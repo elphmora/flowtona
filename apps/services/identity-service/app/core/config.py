@@ -1,5 +1,3 @@
-
-
 """
 Identity Service configuration.
 Loads all settings from environment variables with sensible local defaults.
