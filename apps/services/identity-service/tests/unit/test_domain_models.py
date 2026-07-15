@@ -14,6 +14,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.constants.roles import Role
+from app.models.email_verification import EmailVerification, EmailVerificationStatus
 from app.models.invitation import Invitation, InvitationStatus
 from app.models.membership import MembershipStatus, TenantMembership
 from app.models.refresh_token import RefreshTokenRecord, RefreshTokenStatus
@@ -180,3 +181,94 @@ class TestInvitation:
             **self._base_kwargs(status=InvitationStatus.ACCEPTED, accepted_at=NOW)
         )
         assert invite.status == InvitationStatus.ACCEPTED
+
+
+class TestEmailVerification:
+    def _base_kwargs(self, **overrides):
+        kwargs = dict(
+            user_id=uuid4(),
+            email="dana@example.com",
+            token_hash="hash",
+            created_at=NOW,
+            expires_at=NOW + timedelta(hours=24),
+        )
+        kwargs.update(overrides)
+        return kwargs
+
+    def test_valid_pending_verification_constructs(self):
+        verification = EmailVerification(**self._base_kwargs())
+        assert verification.status == EmailVerificationStatus.PENDING
+
+    def test_expires_at_must_be_after_created_at(self):
+        with pytest.raises(ValidationError):
+            EmailVerification(**self._base_kwargs(expires_at=NOW - timedelta(hours=1)))
+
+    def test_consumed_status_requires_consumed_at(self):
+        with pytest.raises(ValidationError):
+            EmailVerification(
+                **self._base_kwargs(
+                    status=EmailVerificationStatus.CONSUMED, consumed_at=None
+                )
+            )
+
+    def test_revoked_status_requires_revoked_at(self):
+        with pytest.raises(ValidationError):
+            EmailVerification(
+                **self._base_kwargs(
+                    status=EmailVerificationStatus.REVOKED, revoked_at=None
+                )
+            )
+
+    def test_pending_status_rejects_consumed_at(self):
+        with pytest.raises(ValidationError):
+            EmailVerification(**self._base_kwargs(consumed_at=NOW))
+
+    def test_pending_status_rejects_revoked_at(self):
+        with pytest.raises(ValidationError):
+            EmailVerification(**self._base_kwargs(revoked_at=NOW))
+
+    def test_consumed_status_rejects_revoked_at(self):
+        with pytest.raises(ValidationError):
+            EmailVerification(
+                **self._base_kwargs(
+                    status=EmailVerificationStatus.CONSUMED,
+                    consumed_at=NOW,
+                    revoked_at=NOW,
+                )
+            )
+
+    def test_revoked_status_rejects_consumed_at(self):
+        with pytest.raises(ValidationError):
+            EmailVerification(
+                **self._base_kwargs(
+                    status=EmailVerificationStatus.REVOKED,
+                    revoked_at=NOW,
+                    consumed_at=NOW,
+                )
+            )
+
+    def test_consumed_status_with_consumed_at_is_valid(self):
+        verification = EmailVerification(
+            **self._base_kwargs(
+                status=EmailVerificationStatus.CONSUMED,
+                consumed_at=NOW,
+            )
+        )
+        assert verification.status == EmailVerificationStatus.CONSUMED
+        assert verification.consumed_at == NOW
+
+    def test_revoked_status_with_revoked_at_is_valid(self):
+        verification = EmailVerification(
+            **self._base_kwargs(
+                status=EmailVerificationStatus.REVOKED,
+                revoked_at=NOW,
+            )
+        )
+        assert verification.status == EmailVerificationStatus.REVOKED
+        assert verification.revoked_at == NOW
+
+    def test_not_on_user_model(self):
+        """Guards the actual fix: verification fields must not have landed
+        on User after all."""
+        assert "email_verification_token_hash" not in User.model_fields
+        assert "email_verification_token_expires_at" not in User.model_fields
