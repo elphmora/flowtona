@@ -2,9 +2,6 @@
 app/repositories/in_memory/user_repository.py
 
 In-memory implementation of UserRepository (Protocol, Decision 9).
-Structural typing means this class doesn't need to inherit from
-UserRepository explicitly — conformance is checked by mypy/pyright, not
-enforced at runtime.
 
 Establishes the pattern the other five in-memory repositories follow:
 - one shared InMemoryIdentityStore instance, passed in via constructor
@@ -23,6 +20,9 @@ Establishes the pattern the other five in-memory repositories follow:
 - no Clock abstraction (considered and deferred 2026-07-14) —
   datetime.now(timezone.utc) directly; nothing currently needs
   deterministic time control in tests
+
+create() accepts email_verified (default False) — see the Protocol's
+docstring on why (Invariant 9, invitation acceptance by a new user).
 """
 
 from datetime import datetime, timezone
@@ -44,6 +44,7 @@ class InMemoryUserRepository:
         email: str,
         password_hash: str,
         display_name: str,
+        email_verified: bool = False,
     ) -> User:
         normalized = normalise_email(email)
 
@@ -55,6 +56,7 @@ class InMemoryUserRepository:
                 email=normalized,
                 password_hash=password_hash,
                 display_name=display_name,
+                email_verified=email_verified,
                 created_at=datetime.now(timezone.utc),
             )
             stored = user.model_copy(deep=True)

@@ -8,11 +8,12 @@ takes no tenant_id, since which tenant a credential belongs to is only
 knowable after the password is checked (see 01-api-contract.md's login
 flow).
 
-No verification-token lookup here — that's EmailVerificationRepository's
-job (app/models/email_verification.py), not UserRepository's. A prior
-draft of this file put get_by_verification_token_hash() here; corrected
-2026-07-14 before it was ever committed, since credential-token lookup
-is outside UserRepository's natural responsibility.
+create() accepts email_verified (default False) — needed for invitation
+acceptance by a brand-new user (Invariant 9: accepting an invite
+implicitly verifies the invitee's email). Added 2026-07-17 while
+building UserService; the original Protocol lacked this, which would
+have forced a create-then-update two-step for that path instead of one
+atomic creation call.
 
 create() takes business fields as keyword arguments, not a pre-built User
 — id and created_at are repository-owned, generated at persistence time,
@@ -33,9 +34,11 @@ class UserRepository(Protocol):
         email: str,
         password_hash: str,
         display_name: str,
+        email_verified: bool = False,
     ) -> User:
-        """Create a new user. Called during signup (Flow 1) and invite
-        acceptance for a new account (Flow 8)."""
+        """Create a new user. Called during signup (Flow 1, email_verified
+        defaults False) and invite acceptance for a new account (Flow 8,
+        email_verified=True per Invariant 9)."""
         ...
 
     async def get_by_id(self, *, user_id: UUID) -> User | None: ...
