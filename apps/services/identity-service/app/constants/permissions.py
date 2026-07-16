@@ -53,3 +53,18 @@ def permissions_for_role(role: Role) -> frozenset[Permission]:
     lives in services/permission_service.py, not here — this function is
     intentionally dumb."""
     return ROLE_PERMISSIONS[role]
+
+
+# Decision 18's soft gate, made explicit rather than inferred inside
+# PermissionService. Decision 18's own text names "inviting teammates"
+# and "anything billing-related" as gated behind email confirmation —
+# that maps directly to these two permissions. SCHEDULE_READ (viewing
+# your own schedule) is basic functionality, not team/billing
+# management, so it's deliberately NOT in this set — it stays available
+# regardless of verification status.
+SOFT_GATED_PERMISSIONS: frozenset[Permission] = frozenset(
+    {
+        Permission.BILLING_MANAGE,
+        Permission.MEMBERS_INVITE,
+    }
+)
