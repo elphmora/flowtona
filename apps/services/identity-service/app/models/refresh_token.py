@@ -56,13 +56,22 @@ class RefreshTokenRecord(DomainModel):
         return self
 
     @model_validator(mode="after")
-    def _check_replaced_by_only_when_rotated(self) -> "RefreshTokenRecord":
+    def _check_replaced_by_not_set_while_active(self) -> "RefreshTokenRecord":
+        """replaced_by_token_id is a permanent record of "this token was
+        superseded during rotation" — it stays set even after the token
+        is LATER revoked (e.g. by revoke_family() sweeping up an already-
+        rotated ancestor). The only genuinely invalid combination is
+        ACTIVE + replaced_by_token_id set: a token can't simultaneously
+        be currently valid and already superseded. Corrected 2026-07-16 —
+        the original version of this validator only allowed
+        replaced_by_token_id when status == ROTATED, which incorrectly
+        rejected a rotated-then-revoked token and broke revoke_family()."""
         if (
             self.replaced_by_token_id is not None
-            and self.status != RefreshTokenStatus.ROTATED
+            and self.status == RefreshTokenStatus.ACTIVE
         ):
             raise ValueError(
-                "replaced_by_token_id may only be set when status is 'rotated'"
+                "replaced_by_token_id cannot be set while status is 'active'"
             )
         return self
 

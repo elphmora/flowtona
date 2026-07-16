@@ -112,7 +112,12 @@ class TestRefreshTokenRecord:
                 **self._base_kwargs(expires_at=NOW - timedelta(minutes=1))
             )
 
-    def test_replaced_by_token_id_rejected_unless_rotated(self):
+    def test_replaced_by_token_id_rejected_while_active(self):
+        """Corrected 2026-07-16: the rule is now 'rejected only while
+        ACTIVE', not 'rejected unless ROTATED' — a rotated-then-revoked
+        token legitimately keeps replaced_by_token_id set (see
+        test_revoked_status_with_replaced_by_token_id_is_valid below,
+        which the old, over-strict rule would have wrongly rejected)."""
         with pytest.raises(ValidationError):
             RefreshTokenRecord(
                 **self._base_kwargs(
@@ -140,6 +145,23 @@ class TestRefreshTokenRecord:
             )
         )
         assert token.status == RefreshTokenStatus.ROTATED
+
+    def test_revoked_status_with_replaced_by_token_id_is_valid(self):
+        """A token that was previously rotated (replaced_by_token_id set)
+        and is LATER revoked as part of a family-wide sweep must remain
+        constructible — this is the exact combination
+        InMemoryRefreshTokenRepository.revoke_family() produces, and the
+        bug this test guards against broke that method in practice."""
+        token = RefreshTokenRecord(
+            **self._base_kwargs(
+                status=RefreshTokenStatus.REVOKED,
+                replaced_by_token_id=uuid4(),
+                rotated_at=NOW,
+                revoked_at=NOW,
+            )
+        )
+        assert token.status == RefreshTokenStatus.REVOKED
+        assert token.replaced_by_token_id is not None
 
     def test_revoked_status_requires_revoked_at(self):
         with pytest.raises(ValidationError):
