@@ -69,5 +69,13 @@ class Settings(BaseSettings):
     AUTH_ACCOUNT_DELAY_MAX_SECONDS: int = 30
     AUTH_ACCOUNT_FAILURE_DECAY_SECONDS: int = 1800
 
+    # Password hashing — Decision 7 (argon2id, configurable cost params,
+    # not hardcoded). Defaults match argon2-cffi's own library defaults,
+    # which already track general-purpose recommendations — override
+    # per environment as needed, not by changing code.
+    ARGON2_TIME_COST: int = 3
+    ARGON2_MEMORY_COST_KIB: int = 65536  # 64 MB
+    ARGON2_PARALLELISM: int = 4
+
 
 settings = Settings()
