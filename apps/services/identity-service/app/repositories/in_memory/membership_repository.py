@@ -13,6 +13,10 @@ fields define the membership's identity and its index keys
 (membership_id_by_user_tenant, membership_ids_by_user). Silently
 rewriting indexes to follow a changed identity field is exactly the kind
 of thing that quietly corrupts a store; better to refuse outright.
+
+bump_permissions_version_for_user() is a single atomic operation, not a
+per-membership loop calling update() — matches
+RefreshTokenRepository.revoke_family()/revoke_all_active()'s shape.
 """
 
 from datetime import datetime, timezone
@@ -90,3 +94,20 @@ class InMemoryMembershipRepository:
                 deep=True
             )
             return membership.model_copy(deep=True)
+
+    async def bump_permissions_version_for_user(
+        self, *, user_id: UUID
+    ) -> list[TenantMembership]:
+        async with self._store.lock:
+            ids = self._store.membership_ids_by_user.get(user_id, [])
+            updated: list[TenantMembership] = []
+            for membership_id in ids:
+                membership = self._store.memberships_by_id[membership_id]
+                data = membership.model_dump()
+                data["permissions_version"] = membership.permissions_version + 1
+                new_membership = TenantMembership(**data)
+                self._store.memberships_by_id[membership_id] = (
+                    new_membership.model_copy(deep=True)
+                )
+                updated.append(new_membership.model_copy(deep=True))
+            return updated
