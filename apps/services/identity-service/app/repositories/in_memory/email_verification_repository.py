@@ -9,6 +9,14 @@ email is normalized the same way as UserRepository (app/utils/email.py)
 compares two values normalized the same way, rather than potentially
 failing on casing alone.
 
+mark_consumed() now checks expiry as part of its atomic guard, not just
+status == PENDING — added 2026-07-17 while building EmailVerificationService.
+InvitationRepository.mark_accepted() already enforced expiry
+(expires_at <= accepted_at); this repository's equivalent guard didn't,
+which was an inconsistency between two structurally identical entities
+(both token-hash-based, single-use, time-limited), not a deliberate
+design choice.
+
 State transitions (mark_consumed, revoke_pending_for_user) reconstruct
 the full model via model_dump() + the constructor, NOT
 model_copy(update=...) — model_copy does not run Pydantic validators,
@@ -97,6 +105,14 @@ class InMemoryEmailVerificationRepository:
                     identifier=verification_id,
                     expected_state="pending",
                     actual_state=verification.status.value,
+                )
+
+            if verification.expires_at <= consumed_at:
+                raise ConcurrentUpdateError(
+                    entity="email_verification",
+                    identifier=verification_id,
+                    expected_state="unexpired",
+                    actual_state="expired",
                 )
 
             data = verification.model_dump()

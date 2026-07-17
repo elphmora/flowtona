@@ -3,6 +3,13 @@ app/repositories/email_verification_repository.py
 
 Protocol contract for EmailVerification persistence (Decision 9). Global
 entity, not tenant-owned — see app/models/email_verification.py.
+
+mark_consumed() atomically requires status == PENDING AND
+expires_at > consumed_at — added 2026-07-17, matching
+InvitationRepository.mark_accepted()'s equivalent expiry guard. An
+earlier version of this method only checked status, which was an
+inconsistency between two structurally identical entities (both
+token-hash-based, single-use, time-limited), not a deliberate choice.
 """
 
 from datetime import datetime
@@ -33,10 +40,11 @@ class EmailVerificationRepository(Protocol):
     async def mark_consumed(
         self, *, verification_id: UUID, consumed_at: datetime
     ) -> EmailVerification:
-        """Transition a verification record to consumed, after the
-        corresponding User has been marked email_verified=True. Returns
-        the updated record — makes service code and tests more explicit
-        than a bare None."""
+        """Atomically transition one pending, unexpired verification
+        record to consumed. Must succeed only when status is PENDING
+        and expires_at > consumed_at — concurrent/duplicate attempts,
+        or an attempt after expiry, must not succeed. Returns the
+        updated record."""
         ...
 
     async def revoke_pending_for_user(
