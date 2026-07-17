@@ -45,6 +45,9 @@ class Settings(BaseSettings):
     # Email verification token lifetime
     EMAIL_VERIFICATION_TOKEN_EXPIRE_HOURS: int = 24
 
+    # Invitation token lifetime
+    INVITATION_TOKEN_EXPIRE_DAYS: int = 7
+
     # Tenant-selection pre-auth token
     PREAUTH_TOKEN_EXPIRE_SECONDS: int = 120
 
