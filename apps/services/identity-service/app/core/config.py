@@ -1,6 +1,5 @@
 """
 Identity Service configuration.
-
 Loads all settings from environment variables with sensible local defaults.
 """
 
@@ -42,6 +41,9 @@ class Settings(BaseSettings):
 
     # Opaque refresh token — provisional Phase 1 lifetime
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+
+    # Email verification token lifetime
+    EMAIL_VERIFICATION_TOKEN_EXPIRE_HOURS: int = 24
 
     # Tenant-selection pre-auth token
     PREAUTH_TOKEN_EXPIRE_SECONDS: int = 120

@@ -1,16 +1,19 @@
 
-
 """
 tests/unit/services/conftest.py
 
-Services are tested against the real InMemoryUserRepository (not a
-mock) — it's already independently tested (tests/unit/repositories/),
-so using it here tests UserService's actual behavior end to end rather
-than testing against assumptions about what the repository does.
+Services are tested against the real in-memory repository
+implementations (not mocks) — they're already independently tested
+(tests/unit/repositories/), so using them here tests each service's
+actual behavior end to end rather than testing against assumptions
+about what a repository does.
 """
 
 import pytest
 
+from app.repositories.in_memory.email_verification_repository import (
+    InMemoryEmailVerificationRepository,
+)
 from app.repositories.in_memory.store import InMemoryIdentityStore
 from app.repositories.in_memory.user_repository import InMemoryUserRepository
 
@@ -23,3 +26,10 @@ def store() -> InMemoryIdentityStore:
 @pytest.fixture
 def user_repo(store: InMemoryIdentityStore) -> InMemoryUserRepository:
     return InMemoryUserRepository(store)
+
+
+@pytest.fixture
+def email_verification_repo(
+    store: InMemoryIdentityStore,
+) -> InMemoryEmailVerificationRepository:
+    return InMemoryEmailVerificationRepository(store)
