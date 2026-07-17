@@ -62,3 +62,58 @@ async def test_update_rejects_identity_field_change(membership_repo):
 
     with pytest.raises(NotImplementedError):
         await membership_repo.update(membership=membership)
+
+
+@pytest.mark.asyncio
+async def test_bump_permissions_version_for_user_increments_every_membership(
+    membership_repo,
+):
+    user_id = uuid4()
+    m1 = await membership_repo.create(
+        user_id=user_id, tenant_id=uuid4(), role=Role.OWNER
+    )
+    m2 = await membership_repo.create(
+        user_id=user_id, tenant_id=uuid4(), role=Role.TECHNICIAN
+    )
+
+    updated = await membership_repo.bump_permissions_version_for_user(user_id=user_id)
+
+    assert len(updated) == 2
+    assert {m.id for m in updated} == {m1.id, m2.id}
+    assert all(m.permissions_version == 1 for m in updated)
+
+    # Confirm persisted, independent of the returned objects.
+    persisted_1 = await membership_repo.get_by_user_and_tenant(
+        user_id=user_id, tenant_id=m1.tenant_id
+    )
+    persisted_2 = await membership_repo.get_by_user_and_tenant(
+        user_id=user_id, tenant_id=m2.tenant_id
+    )
+    assert persisted_1.permissions_version == 1
+    assert persisted_2.permissions_version == 1
+
+
+@pytest.mark.asyncio
+async def test_bump_permissions_version_for_user_does_not_affect_other_users(
+    membership_repo,
+):
+    user_a, user_b = uuid4(), uuid4()
+    await membership_repo.create(user_id=user_a, tenant_id=uuid4(), role=Role.OWNER)
+    membership_b = await membership_repo.create(
+        user_id=user_b, tenant_id=uuid4(), role=Role.OWNER
+    )
+
+    await membership_repo.bump_permissions_version_for_user(user_id=user_a)
+
+    unaffected = await membership_repo.get_by_user_and_tenant(
+        user_id=user_b, tenant_id=membership_b.tenant_id
+    )
+    assert unaffected.permissions_version == 0
+
+
+@pytest.mark.asyncio
+async def test_bump_permissions_version_for_user_returns_empty_list_when_no_memberships(
+    membership_repo,
+):
+    result = await membership_repo.bump_permissions_version_for_user(user_id=uuid4())
+    assert result == []

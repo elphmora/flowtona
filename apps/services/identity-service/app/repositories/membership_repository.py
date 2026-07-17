@@ -43,10 +43,31 @@ class MembershipRepository(Protocol):
     ) -> list[TenantMembership]:
         """All of a user's memberships across every tenant — powers
         GET /v1/users/me (Decision 2's global-User rationale) and the
-        multi-membership login flow (Flow 3)."""
+        multi-membership login flow (Flow 3). Order is a genuine
+        contract guarantee, not an in-memory implementation accident:
+        results must preserve a stable, deterministic order (insertion
+        order is the current choice) — GET /v1/users/me presents this
+        list to the end user, and a Postgres implementation must include
+        an explicit ORDER BY to honor this same guarantee."""
         ...
 
     async def update(self, *, membership: TenantMembership) -> TenantMembership:
-        """Persist status or permissions_version changes. Takes the full
-        updated model, same reasoning as UserRepository.update()."""
+        """Persist status changes to a single membership. Takes the full
+        updated model, same reasoning as UserRepository.update(). NOT
+        used for permissions_version bumps across multiple memberships —
+        see bump_permissions_version_for_user() below for that bulk case."""
+        ...
+
+    async def bump_permissions_version_for_user(
+        self, *, user_id: UUID
+    ) -> list[TenantMembership]:
+        """Atomically increment permissions_version on every membership
+        belonging to the supplied user. Same shape as
+        RefreshTokenRepository.revoke_family()/revoke_all_active() — a
+        bulk state change, not a service-level loop. This makes the
+        bump-across-memberships step atomic; the larger workflow calling
+        it (consume EmailVerification + update User + this bump) is
+        still not atomic as a whole — see the ADR's Deferred Decisions:
+        Unit of Work entry for that separate, still-open concern.
+        Returns the updated memberships."""
         ...
