@@ -1,5 +1,3 @@
-
-
 """tests/unit/services/test_user_service.py"""
 
 from unittest.mock import patch

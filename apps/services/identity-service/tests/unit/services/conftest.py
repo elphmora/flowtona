@@ -1,4 +1,3 @@
-
 """
 tests/unit/services/conftest.py
 
@@ -15,6 +14,7 @@ from app.repositories.in_memory.email_verification_repository import (
     InMemoryEmailVerificationRepository,
 )
 from app.repositories.in_memory.store import InMemoryIdentityStore
+from app.repositories.in_memory.tenant_repository import InMemoryTenantRepository
 from app.repositories.in_memory.user_repository import InMemoryUserRepository
 
 
@@ -33,3 +33,8 @@ def email_verification_repo(
     store: InMemoryIdentityStore,
 ) -> InMemoryEmailVerificationRepository:
     return InMemoryEmailVerificationRepository(store)
+
+
+@pytest.fixture
+def tenant_repo(store: InMemoryIdentityStore) -> InMemoryTenantRepository:
+    return InMemoryTenantRepository(store)

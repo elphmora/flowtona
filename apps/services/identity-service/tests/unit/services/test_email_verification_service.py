@@ -1,5 +1,3 @@
-
-
 """tests/unit/services/test_email_verification_service.py"""
 
 import asyncio
@@ -24,7 +22,9 @@ def service(email_verification_repo) -> EmailVerificationService:
 
 
 class TestCreate:
-    async def test_returns_raw_token_not_the_hash(self, service, email_verification_repo):
+    async def test_returns_raw_token_not_the_hash(
+        self, service, email_verification_repo
+    ):
         user_id = uuid4()
         raw_token = await service.create(user_id=user_id, email="dana@example.com")
 
