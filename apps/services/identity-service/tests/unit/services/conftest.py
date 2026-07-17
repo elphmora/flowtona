@@ -13,6 +13,9 @@ import pytest
 from app.repositories.in_memory.email_verification_repository import (
     InMemoryEmailVerificationRepository,
 )
+from app.repositories.in_memory.invitation_repository import (
+    InMemoryInvitationRepository,
+)
 from app.repositories.in_memory.membership_repository import (
     InMemoryMembershipRepository,
 )
@@ -46,3 +49,8 @@ def tenant_repo(store: InMemoryIdentityStore) -> InMemoryTenantRepository:
 @pytest.fixture
 def membership_repo(store: InMemoryIdentityStore) -> InMemoryMembershipRepository:
     return InMemoryMembershipRepository(store)
+
+
+@pytest.fixture
+def invitation_repo(store: InMemoryIdentityStore) -> InMemoryInvitationRepository:
+    return InMemoryInvitationRepository(store)
