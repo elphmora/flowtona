@@ -19,6 +19,9 @@ from app.repositories.in_memory.invitation_repository import (
 from app.repositories.in_memory.membership_repository import (
     InMemoryMembershipRepository,
 )
+from app.repositories.in_memory.refresh_token_repository import (
+    InMemoryRefreshTokenRepository,
+)
 from app.repositories.in_memory.store import InMemoryIdentityStore
 from app.repositories.in_memory.tenant_repository import InMemoryTenantRepository
 from app.repositories.in_memory.user_repository import InMemoryUserRepository
@@ -54,3 +57,8 @@ def membership_repo(store: InMemoryIdentityStore) -> InMemoryMembershipRepositor
 @pytest.fixture
 def invitation_repo(store: InMemoryIdentityStore) -> InMemoryInvitationRepository:
     return InMemoryInvitationRepository(store)
+
+
+@pytest.fixture
+def refresh_token_repo(store: InMemoryIdentityStore) -> InMemoryRefreshTokenRepository:
+    return InMemoryRefreshTokenRepository(store)
