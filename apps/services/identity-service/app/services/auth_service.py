@@ -12,12 +12,13 @@ codebase: repositories own persistence and atomic state transitions,
 entity services own aggregate-specific business rules, AuthService
 owns workflows spanning more than one of them.
 
-PR scope: signup(), login(), select_tenant(), refresh(), logout(), and
-logout_all_for_tenant(). The remaining four methods (email verification,
-resend, and both invite-acceptance variants) stay NotImplementedError
-stubs, filled in across the follow-up PRs already agreed — a single PR
-covering all ten methods at once would be unreviewable, given how much
-review churn every individual service in this build has gone through.
+PR scope: signup(), login(), select_tenant(), refresh(), logout(),
+logout_all_for_tenant(), verify_email(), and resend_verification_email().
+The remaining two methods (both invite-acceptance variants) stay
+NotImplementedError stubs, filled in by the final follow-up PR already
+agreed — a single PR covering all ten methods at once would be
+unreviewable, given how much review churn every individual service in
+this build has gone through.
 
 KNOWN GAPS, not solved anywhere in this codebase yet:
 - Rate limiting (Decision 12) is intentionally handled outside this
@@ -143,14 +144,14 @@ class AuthService:
             await self._email_sender.send_verification_email(
                 to=user.email, raw_token=raw_verification_token
             )
-        except Exception as exc:
+        except Exception:
             # Deliberately broad — isolating an inherently unreliable
             # external dependency (email delivery) is exactly the
             # legitimate case for catching Exception broadly. Any
             # failure here must never fail signup itself (Decision 18).
             # TODO: log email delivery failure (Decision 17) once
             # structured logging is wired up.
-            del exc
+            pass
 
         return session
 
@@ -319,18 +320,49 @@ class AuthService:
         )
 
     async def verify_email(self, *, raw_token: str) -> None:
-        """Flow 1 continuation. EmailVerificationService.verify()
-        (consume-first, atomic) -> UserService.mark_email_verified() ->
-        MembershipService.bump_permissions_version_for_user()."""
-        raise NotImplementedError("Implemented in a follow-up PR")
+        """Flow 1 continuation. Order is non-negotiable: consume the
+        verification token before updating the user, to prevent a
+        duplicate or concurrent verification request from applying the
+        workflow twice — EmailVerificationService.verify() is already
+        atomic and consume-first internally, so a repeated call fails
+        cleanly at that gate before ever touching User or Membership.
+        Does NOT touch RefreshTokenService or issue new tokens —
+        Invariant 15: verifying an email must not invalidate any
+        existing session; newly-unlocked permissions apply from the
+        caller's next refresh() onward, not immediately."""
+        verification = await self._email_verification_service.verify(
+            raw_token=raw_token
+        )
+        await self._user_service.mark_email_verified(
+            user_id=verification.user_id, expected_email=verification.email
+        )
+        await self._membership_service.bump_permissions_version_for_user(
+            user_id=verification.user_id
+        )
 
     async def resend_verification_email(self, *, user_id: UUID) -> None:
         """user_id from an authenticated caller — the soft gate means
         they're already logged in and simply haven't verified yet, so
-        this doesn't accept a bare email address. UserService.get_by_id
-        for the address -> EmailVerificationService.resend() ->
-        email_sender.send_verification_email."""
-        raise NotImplementedError("Implemented in a follow-up PR")
+        this doesn't accept a bare email address (which would let
+        anyone probe whether an arbitrary address has an account).
+
+        Unlike signup()'s verification email, delivery failure here is
+        NOT suppressed — resend's entire purpose is sending this one
+        email, so a failure here means the operation genuinely failed
+        at its one job, and the caller needs to know (to retry, surface
+        an error) rather than receiving a false success."""
+        user = await self._user_service.get_by_id(user_id=user_id)
+        if user is None:
+            raise IdentityInvariantError(
+                f"Authenticated caller references missing user {user_id}"
+            )
+
+        raw_token = await self._email_verification_service.resend(
+            user_id=user.id, email=user.email
+        )
+        await self._email_sender.send_verification_email(
+            to=user.email, raw_token=raw_token
+        )
 
     async def create_invite(
         self, *, tenant_id: UUID, email: str, role: Role, invited_by_user_id: UUID
