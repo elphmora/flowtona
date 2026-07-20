@@ -4,7 +4,9 @@ Loads all settings from environment variables with sensible local defaults.
 """
 
 from enum import StrEnum
+from urllib.parse import urlsplit
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -81,6 +83,52 @@ class Settings(BaseSettings):
     ARGON2_TIME_COST: int = 3
     ARGON2_MEMORY_COST_KIB: int = 65536  # 64 MB
     ARGON2_PARALLELISM: int = 4
+
+    # RFC 9457 Problem Details — base URI for error `type` fields
+    # (Decision 15). Configurable, not hardcoded in the exception
+    # handler, so a different deployment (staging, internal) can point
+    # at a different base without a code change. Must NOT have a
+    # trailing slash — app/api/errors.py builds type URIs as
+    # f"{ERROR_BASE_URI}/{code}", so a trailing slash here would
+    # produce a double slash (".../errors//invalid-credentials").
+    #
+    # Kept as a plain str, not AnyUrl/HttpUrl — those types apply their
+    # own URL normalization (which can itself add a trailing slash in
+    # some cases), which would risk silently violating the exact
+    # constraint this field needs. The validator below catches
+    # misconfiguration at startup instead, without that uncertainty.
+    ERROR_BASE_URI: str = "https://flowtona.dev/errors"
+
+    @field_validator("ERROR_BASE_URI")
+    @classmethod
+    def _validate_error_base_uri(cls, value: str) -> str:
+        if value != value.strip():
+            raise ValueError("ERROR_BASE_URI must not contain surrounding whitespace")
+
+        parsed = urlsplit(value)
+        if parsed.scheme not in {"http", "https"}:
+            raise ValueError(
+                f"ERROR_BASE_URI must use the http or https scheme, got: {value!r}"
+            )
+        if not parsed.netloc:
+            raise ValueError(f"ERROR_BASE_URI must include a host, got: {value!r}")
+        if parsed.username or parsed.password:
+            raise ValueError("ERROR_BASE_URI must not contain user credentials.")
+        if not parsed.path or parsed.path == "/":
+            raise ValueError(
+                f"ERROR_BASE_URI must include a non-root path (e.g. /errors), "
+                f"got: {value!r}"
+            )
+        if value.endswith("/"):
+            raise ValueError(
+                f"ERROR_BASE_URI must not have a trailing slash, got: {value!r}"
+            )
+        if parsed.query or parsed.fragment:
+            raise ValueError(
+                "ERROR_BASE_URI must not contain a query string or fragment, "
+                f"got: {value!r}"
+            )
+        return value
 
 
 settings = Settings()
