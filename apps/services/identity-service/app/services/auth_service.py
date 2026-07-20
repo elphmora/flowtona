@@ -12,13 +12,15 @@ codebase: repositories own persistence and atomic state transitions,
 entity services own aggregate-specific business rules, AuthService
 owns workflows spanning more than one of them.
 
-PR scope: signup(), login(), select_tenant(), refresh(), logout(),
-logout_all_for_tenant(), verify_email(), and resend_verification_email().
-The remaining two methods (both invite-acceptance variants) stay
-NotImplementedError stubs, filled in by the final follow-up PR already
-agreed — a single PR covering all ten methods at once would be
-unreviewable, given how much review churn every individual service in
-this build has gone through.
+All ten public methods are now implemented: signup(), login(),
+select_tenant(), refresh(), logout(), logout_all_for_tenant(),
+verify_email(), resend_verification_email(), create_invite(),
+accept_invite_existing_user(), accept_invite_new_user(). Built
+incrementally across five PRs (skeleton and contracts; signup/login/
+tenant-selection; refresh/logout/logout-all; email verification/
+resend; invitations) — a single PR covering all ten at once would have
+been unreviewable, given how much review churn every individual
+service in this build has gone through.
 
 KNOWN GAPS, not solved anywhere in this codebase yet:
 - Rate limiting (Decision 12) is intentionally handled outside this
@@ -40,11 +42,19 @@ future reader doesn't wonder whether it was simply forgotten):
   pipeline) exists yet to justify building it ahead of that need
 """
 
+from datetime import datetime, timezone
 from uuid import UUID
 
+from app.constants.permissions import Permission
 from app.constants.roles import Role
-from app.exceptions.auth import InvalidCredentialsError, NoActiveMembershipError
+from app.exceptions.auth import (
+    InvalidCredentialsError,
+    NoActiveMembershipError,
+    PermissionDeniedError,
+)
 from app.exceptions.base import IdentityInvariantError
+from app.exceptions.invitation import InvitationEmailMismatchError
+from app.exceptions.membership import AlreadyAMemberError
 from app.models.invitation import Invitation
 from app.models.membership import MembershipStatus, TenantMembership
 from app.models.tenant import Tenant
@@ -367,34 +377,145 @@ class AuthService:
     async def create_invite(
         self, *, tenant_id: UUID, email: str, role: Role, invited_by_user_id: UUID
     ) -> Invitation:
-        """Flow 6. PermissionService check (members:invite) ->
-        duplicate-membership guard -> InvitationService.create() ->
-        email_sender.send_invitation_email."""
-        raise NotImplementedError("Implemented in a follow-up PR")
+        """Flow 6. Unlike signup()'s verification email, delivery
+        failure here is NOT suppressed — Invitation deliberately has no
+        resend capability (a designed absence, not an oversight), so a
+        suppressed failure would leave a permanently orphaned,
+        undiscoverable invitation with no way for anyone to ever learn
+        about it. Failing loudly is more honest than that."""
+        inviter = await self._user_service.get_by_id(user_id=invited_by_user_id)
+        if inviter is None:
+            raise IdentityInvariantError(
+                f"Authenticated caller references missing user {invited_by_user_id}"
+            )
+
+        inviter_membership = await self._membership_service.get_by_user_and_tenant(
+            user_id=invited_by_user_id, tenant_id=tenant_id
+        )
+        if (
+            inviter_membership is None
+            or inviter_membership.status != MembershipStatus.ACTIVE
+        ):
+            raise NoActiveMembershipError()
+
+        if not self._permission_service.has_permission(
+            user=inviter,
+            membership=inviter_membership,
+            permission=Permission.MEMBERS_INVITE,
+        ):
+            raise PermissionDeniedError()
+
+        existing_user = await self._user_service.get_by_email(email=email)
+        if existing_user is not None:
+            existing_membership = await self._membership_service.get_by_user_and_tenant(
+                user_id=existing_user.id, tenant_id=tenant_id
+            )
+            if (
+                existing_membership is not None
+                and existing_membership.status == MembershipStatus.ACTIVE
+            ):
+                raise AlreadyAMemberError()
+
+        tenant = await self._tenant_service.get_by_id(tenant_id=tenant_id)
+        if tenant is None:
+            raise IdentityInvariantError(
+                f"Membership references missing tenant {tenant_id}"
+            )
+
+        invitation, raw_invite_token = await self._invitation_service.create(
+            tenant_id=tenant_id,
+            email=email,
+            role=role,
+            invited_by_user_id=invited_by_user_id,
+        )
+
+        await self._email_sender.send_invitation_email(
+            to=email, raw_token=raw_invite_token, tenant=tenant, invited_by=inviter
+        )
+
+        return invitation
 
     async def accept_invite_existing_user(
         self, *, raw_token: str, authenticated_user_id: UUID
     ) -> InviteAcceptanceResult:
-        """Flow 7. InvitationService.resolve_pending() -> compare
-        invite.email against the authenticated user's email
-        (InvitationEmailMismatchError on mismatch — this comparison can
-        only happen here, since InvitationService deliberately has no
-        User access) -> MembershipService.create() ->
-        InvitationService.mark_accepted() LAST, not first (acceptance
-        spans multiple aggregates — see InvitationService's own
-        docstring on why marking accepted first would risk a
-        permanently-burned invite if membership creation then failed).
-        Does NOT mint a new session — see InviteAcceptanceResult's
-        docstring."""
-        raise NotImplementedError("Implemented in a follow-up PR")
+        """Flow 7. Does NOT mint a new session — see
+        InviteAcceptanceResult's docstring on why accepting an invite
+        and switching active tenant are kept as separate actions.
+
+        NOT YET HANDLED, deliberately: if mark_accepted() fails after
+        MembershipService.create() already succeeded (a partial
+        failure within the multi-repository span this workflow covers
+        — already tracked in the ADR's Unit of Work entry), a retry of
+        this whole method will hit AlreadyAMemberError on the
+        membership step even though the invitation itself was never
+        actually marked accepted. Catching that and treating an
+        already-existing matching membership as "safe to continue to
+        mark_accepted()" would only treat the symptom — the real fix is
+        the Unit of Work this workflow doesn't have yet, not a retry
+        special-case bolted on around its absence."""
+        invitation = await self._invitation_service.resolve_pending(raw_token=raw_token)
+
+        user = await self._user_service.get_by_id(user_id=authenticated_user_id)
+        if user is None:
+            raise IdentityInvariantError(
+                f"Authenticated caller references missing user {authenticated_user_id}"
+            )
+
+        if invitation.email != user.email:
+            raise InvitationEmailMismatchError()
+
+        membership = await self._membership_service.create(
+            user_id=user.id, tenant_id=invitation.tenant_id, role=invitation.role
+        )
+
+        accepted_invitation = await self._invitation_service.mark_accepted(
+            invitation_id=invitation.id, accepted_at=datetime.now(timezone.utc)
+        )
+
+        tenant = await self._tenant_service.get_by_id(tenant_id=invitation.tenant_id)
+        if tenant is None:
+            raise IdentityInvariantError(
+                f"Invitation references missing tenant {invitation.tenant_id}"
+            )
+
+        return InviteAcceptanceResult(
+            invitation=accepted_invitation, tenant=tenant, membership=membership
+        )
 
     async def accept_invite_new_user(
         self, *, raw_token: str, password: str, display_name: str
     ) -> AuthenticatedSession:
-        """Flow 8. Same shape as accept_invite_existing_user(), but
-        UserService.create(..., email_verified=True) — Invariant 9:
-        accepting a mailed invite link IS proof of mailbox ownership.
-        Unlike the existing-user case, there's no prior session to
-        avoid duplicating, so this DOES return a full
-        AuthenticatedSession — the user's very first one."""
-        raise NotImplementedError("Implemented in a follow-up PR")
+        """Flow 8. UserService.create(..., email_verified=True) —
+        Invariant 9: accepting a mailed invite link IS proof of mailbox
+        ownership. No email-mismatch check is needed here (unlike the
+        existing-user case) — the new user's email IS the invitation's
+        email by construction, there's no separate prior identity to
+        compare against. Unlike accept_invite_existing_user(), there's
+        no prior session to avoid duplicating, so this correctly DOES
+        use _issue_session() — the user's very first session."""
+        invitation = await self._invitation_service.resolve_pending(raw_token=raw_token)
+
+        user = await self._user_service.create(
+            email=invitation.email,
+            password=password,
+            display_name=display_name,
+            email_verified=True,
+        )
+
+        membership = await self._membership_service.create(
+            user_id=user.id, tenant_id=invitation.tenant_id, role=invitation.role
+        )
+
+        await self._invitation_service.mark_accepted(
+            invitation_id=invitation.id, accepted_at=datetime.now(timezone.utc)
+        )
+
+        tenant = await self._tenant_service.get_by_id(tenant_id=invitation.tenant_id)
+        if tenant is None:
+            raise IdentityInvariantError(
+                f"Invitation references missing tenant {invitation.tenant_id}"
+            )
+
+        return await self._issue_session(
+            user=user, tenant=tenant, membership=membership
+        )
