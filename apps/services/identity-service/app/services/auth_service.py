@@ -12,22 +12,21 @@ codebase: repositories own persistence and atomic state transitions,
 entity services own aggregate-specific business rules, AuthService
 owns workflows spanning more than one of them.
 
-This file is the skeleton only — constructor wiring and method
-signatures, with method bodies deferred to focused follow-up PRs
-(signup/login/tenant-selection; refresh/logout/logout-all; email
-verification; invitations), given how much review churn every
-individual service in this build has gone through — a single PR
-covering all ten methods at once would be unreviewable.
+PR scope: signup(), login(), select_tenant() only. The remaining seven
+methods stay NotImplementedError stubs, filled in across the follow-up
+PRs already agreed (refresh/logout/logout-all; email verification;
+invitations) — a single PR covering all ten methods at once would be
+unreviewable, given how much review churn every individual service in
+this build has gone through.
 
 KNOWN GAPS, not solved anywhere in this codebase yet:
 - Rate limiting (Decision 12) is intentionally handled outside this
   business layer — a different layer's concern (HTTP middleware), not
   business logic; no RateLimitService exists.
-- signup() and accept_invite_new_user() span multiple repositories
-  without a transaction (User + Tenant + Membership + EmailVerification,
-  or User + Membership + mark_accepted) — already tracked in the ADR's
-  Deferred Decisions: Unit of Work entry. AuthService must not imply
-  atomicity the repositories can't provide.
+- signup() spans multiple repositories without a transaction (User +
+  Tenant + Membership + EmailVerification) — already tracked in the
+  ADR's Deferred Decisions: Unit of Work entry. AuthService must not
+  imply atomicity the repositories can't provide.
 
 Future work (deliberately not addressed now, recorded here so a
 future reader doesn't wonder whether it was simply forgotten):
@@ -43,7 +42,13 @@ future reader doesn't wonder whether it was simply forgotten):
 from uuid import UUID
 
 from app.constants.roles import Role
+from app.exceptions.auth import InvalidCredentialsError, NoActiveMembershipError
+from app.exceptions.base import IdentityInvariantError
 from app.models.invitation import Invitation
+from app.models.membership import MembershipStatus, TenantMembership
+from app.models.tenant import Tenant
+from app.models.user import User
+from app.security.hashing import verify_password
 from app.services.auth_email_sender import AuthEmailSender
 from app.services.auth_models import (
     AuthenticatedSession,
@@ -84,37 +89,148 @@ class AuthService:
         self._permission_service = permission_service
         self._email_sender = email_sender
 
+    async def _issue_session(
+        self, *, user: User, tenant: Tenant, membership: TenantMembership
+    ) -> AuthenticatedSession:
+        """Issues a new refresh-token session and matching access
+        token. Used by signup(), login()'s single-active-membership
+        path, and select_tenant() — the access token always reflects
+        the given membership's CURRENT role/permissions_version, not
+        any cached value."""
+        _, raw_refresh_token = await self._refresh_token_service.issue(
+            user_id=user.id, tenant_id=tenant.id
+        )
+        access_token = await self._token_service.issue_access_token(
+            user_id=user.id,
+            tenant_id=tenant.id,
+            role=membership.role,
+            permissions_version=membership.permissions_version,
+        )
+        return AuthenticatedSession(
+            user=user,
+            tenant=tenant,
+            membership=membership,
+            access_token=access_token,
+            raw_refresh_token=raw_refresh_token,
+        )
+
     async def signup(
         self, *, email: str, password: str, display_name: str, tenant_label: str
     ) -> AuthenticatedSession:
-        """Flow 1. UserService.create -> TenantService.create ->
-        MembershipService.create(role=owner) -> RefreshTokenService.issue
-        -> TokenService.issue_access_token -> EmailVerificationService.create
-        -> email_sender.send_verification_email (failure caught, not
-        propagated — Decision 18's soft gate)."""
-        raise NotImplementedError("Implemented in a follow-up PR")
+        """Flow 1. Only email-delivery failure is caught and suppressed
+        (Decision 18's soft gate — the account is already fully usable,
+        a failed send is recoverable via resend, not a signup failure).
+        Failure to create the verification RECORD itself is NOT
+        suppressed — that's an internal workflow failure, not an
+        unreliable external delivery channel, and should propagate
+        like any other signup step failing."""
+        user = await self._user_service.create(
+            email=email, password=password, display_name=display_name
+        )
+        tenant = await self._tenant_service.create(tenant_label=tenant_label)
+        membership = await self._membership_service.create(
+            user_id=user.id, tenant_id=tenant.id, role=Role.OWNER
+        )
+
+        session = await self._issue_session(
+            user=user, tenant=tenant, membership=membership
+        )
+
+        raw_verification_token = await self._email_verification_service.create(
+            user_id=user.id, email=user.email
+        )
+        try:
+            await self._email_sender.send_verification_email(
+                to=user.email, raw_token=raw_verification_token
+            )
+        except Exception as exc:
+            # Deliberately broad — isolating an inherently unreliable
+            # external dependency (email delivery) is exactly the
+            # legitimate case for catching Exception broadly. Any
+            # failure here must never fail signup itself (Decision 18).
+            # TODO: log email delivery failure (Decision 17) once
+            # structured logging is wired up.
+            del exc
+
+        return session
 
     async def login(
         self, *, email: str, password: str
     ) -> AuthenticatedSession | TenantSelectionRequired:
-        """Flows 2/3. UserService.get_by_email -> verify_password ->
-        MembershipService.get_memberships_for_user, filtered to ACTIVE
-        status only -> branch on count:
-            0 -> NoActiveMembershipError
-            1 -> AuthenticatedSession
-            2+ -> TenantSelectionRequired
-        Wrong email and wrong password both raise InvalidCredentialsError
-        identically, to avoid user enumeration."""
-        raise NotImplementedError("Implemented in a follow-up PR")
+        """Flows 2/3. Missing user and wrong password raise the exact
+        same InvalidCredentialsError — same message, code, and status —
+        to avoid user enumeration via the login endpoint's response."""
+        user = await self._user_service.get_by_email(email=email)
+        if user is None:
+            raise InvalidCredentialsError()
+        if not verify_password(password=password, password_hash=user.password_hash):
+            raise InvalidCredentialsError()
+
+        memberships = await self._membership_service.get_memberships_for_user(
+            user_id=user.id
+        )
+        active_memberships = [
+            m for m in memberships if m.status == MembershipStatus.ACTIVE
+        ]
+
+        if len(active_memberships) == 0:
+            raise NoActiveMembershipError()
+
+        if len(active_memberships) == 1:
+            membership = active_memberships[0]
+            tenant = await self._tenant_service.get_by_id(
+                tenant_id=membership.tenant_id
+            )
+            if tenant is None:
+                raise IdentityInvariantError(
+                    f"Membership {membership.id} references missing "
+                    f"tenant {membership.tenant_id}"
+                )
+            return await self._issue_session(
+                user=user, tenant=tenant, membership=membership
+            )
+
+        preauth_token = await self._token_service.issue_preauth_token(user_id=user.id)
+        return TenantSelectionRequired(user=user, preauth_token=preauth_token)
 
     async def select_tenant(
         self, *, preauth_token: str, tenant_id: UUID
     ) -> AuthenticatedSession:
         """Flow 3 continuation. Verifies the preauth token, then does a
-        FRESH MembershipService lookup for the chosen tenant_id — never
-        trusts anything embedded in the preauth token itself (matches
-        PreauthTokenClaims' deliberately minimal design)."""
-        raise NotImplementedError("Implemented in a follow-up PR")
+        FRESH MembershipService lookup for the CLIENT-SUPPLIED tenant_id
+        — never trusts anything embedded in the preauth token itself
+        (Invariant 14: a pre-auth token identifies a user, never a
+        tenant). Reuses NoActiveMembershipError when the requested
+        membership is missing or inactive — same semantic outcome as
+        login()'s zero-membership case ("valid identity, no active
+        authorization path for this tenant"), just discovered at a
+        different step; not worth a separate exception whose only
+        distinction would be which step found it. Uses the SAME session-
+        issuance tail as signup() — NOT the rest of signup's workflow;
+        this does not create another email-verification token or
+        resend a verification email."""
+        claims = await self._token_service.verify_preauth_token(token=preauth_token)
+
+        membership = await self._membership_service.get_by_user_and_tenant(
+            user_id=claims.user_id, tenant_id=tenant_id
+        )
+        if membership is None or membership.status != MembershipStatus.ACTIVE:
+            raise NoActiveMembershipError()
+
+        user = await self._user_service.get_by_id(user_id=claims.user_id)
+        if user is None:
+            raise IdentityInvariantError(
+                f"Preauth token references missing user {claims.user_id}"
+            )
+        tenant = await self._tenant_service.get_by_id(tenant_id=tenant_id)
+        if tenant is None:
+            raise IdentityInvariantError(
+                f"Membership {membership.id} references missing tenant {tenant_id}"
+            )
+
+        return await self._issue_session(
+            user=user, tenant=tenant, membership=membership
+        )
 
     async def refresh(self, *, raw_refresh_token: str) -> AuthenticatedSession:
         """Flow 4. RefreshTokenService.rotate() first — the only way to
