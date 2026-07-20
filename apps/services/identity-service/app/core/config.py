@@ -4,6 +4,7 @@ Loads all settings from environment variables with sensible local defaults.
 """
 
 from enum import StrEnum
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from pydantic import field_validator
@@ -83,6 +84,14 @@ class Settings(BaseSettings):
     ARGON2_TIME_COST: int = 3
     ARGON2_MEMORY_COST_KIB: int = 65536  # 64 MB
     ARGON2_PARALLELISM: int = 4
+
+    # Local dev secrets directory — FileSecretProvider reads the JWT
+    # signing keypair from here at application startup (see
+    # scripts/generate_signing_keypair.py, which writes to this same
+    # default path). Specific to the Phase 1 file-based SecretProvider
+    # implementation; a future non-local backend (e.g. AWS Secrets
+    # Manager) wouldn't need this setting at all.
+    SECRETS_DIR: Path = Path(".flowtona/secrets")
 
     # RFC 9457 Problem Details — base URI for error `type` fields
     # (Decision 15). Configurable, not hardcoded in the exception
