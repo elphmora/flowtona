@@ -39,3 +39,18 @@ class NoActiveMembershipError(DomainError):
         super().__init__(
             "Your account is not currently associated with an accessible business."
         )
+
+
+class PermissionDeniedError(DomainError):
+    """The caller is authenticated and has an active membership in the
+    relevant tenant, but lacks the specific permission required for
+    this action — distinct from NoActiveMembershipError, which means
+    there's no authorization path at all; this means there IS one, and
+    it just doesn't include the requested action."""
+
+    code = "permission_denied"
+    status_code = 403
+    title = "Permission denied"
+
+    def __init__(self) -> None:
+        super().__init__("You do not have permission to perform this action.")

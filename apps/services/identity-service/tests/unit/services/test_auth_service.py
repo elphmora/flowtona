@@ -2,19 +2,12 @@
 
 Unit tests for AuthService's authentication workflows.
 
-Covers:
-- signup()
-- login()
-- select_tenant()
-- refresh()
-- logout()
-- logout_all_for_tenant()
-- verify_email()
-- resend_verification_email()
-- constructor/DI wiring
-
-The remaining workflows (both invite-acceptance variants) are
-intentionally implemented and tested in the final follow-up PR.
+Covers all ten public methods: signup(), login(), select_tenant(),
+refresh(), logout(), logout_all_for_tenant(), verify_email(),
+resend_verification_email(), create_invite(),
+accept_invite_existing_user(), accept_invite_new_user(), plus
+constructor/DI wiring. Built incrementally across five PRs matching
+AuthService's own build order.
 """
 
 from uuid import uuid4
@@ -22,9 +15,18 @@ from uuid import uuid4
 import pytest
 
 from app.constants.roles import Role
-from app.exceptions.auth import InvalidCredentialsError, NoActiveMembershipError
+from app.exceptions.auth import (
+    InvalidCredentialsError,
+    NoActiveMembershipError,
+    PermissionDeniedError,
+)
 from app.exceptions.base import IdentityInvariantError
 from app.exceptions.email_verification import VerificationTokenInvalidError
+from app.exceptions.invitation import (
+    InvitationEmailMismatchError,
+    InvitationInvalidError,
+)
+from app.exceptions.membership import AlreadyAMemberError
 from app.exceptions.refresh_token import (
     InvalidRefreshTokenError,
     RefreshTokenReuseDetectedError,
@@ -744,6 +746,297 @@ class TestResendVerificationEmail:
 
         with pytest.raises(ConnectionError):
             await service.resend_verification_email(user_id=session.user.id)
+
+
+class TestCreateInvite:
+    pytestmark = pytest.mark.asyncio
+
+    async def _verified_owner_session(self, auth_service, email_sender):
+        """Shared setup: an owner whose email has been verified — a
+        freshly-signed-up owner is NOT yet verified, and
+        members:invite is a soft-gated permission (PermissionService),
+        so an unverified owner would fail the permission check for the
+        wrong reason (soft gate, not role)."""
+        session = await auth_service.signup(
+            email="owner@example.com",
+            password="hunter2",
+            display_name="Owner",
+            tenant_label="Owner's Business",
+        )
+        raw_token = email_sender.last_verification_token_by_email["owner@example.com"]
+        await auth_service.verify_email(raw_token=raw_token)
+        return session
+
+    async def test_successful_invite_creation(self, auth_service, email_sender):
+        session = await self._verified_owner_session(auth_service, email_sender)
+
+        invitation = await auth_service.create_invite(
+            tenant_id=session.tenant.id,
+            email="new.tech@example.com",
+            role=Role.TECHNICIAN,
+            invited_by_user_id=session.user.id,
+        )
+
+        assert invitation.email == "new.tech@example.com"
+        assert invitation.role == Role.TECHNICIAN
+        assert "new.tech@example.com" in email_sender.invitation_emails_sent
+
+    async def test_permission_denied_for_technician(
+        self, auth_service, all_services, email_sender
+    ):
+        session = await self._verified_owner_session(auth_service, email_sender)
+        # A second, verified-irrelevant technician in the same tenant —
+        # technicians don't have members:invite regardless of
+        # verification status.
+        technician_session = await auth_service.signup(
+            email="tech@example.com",
+            password="hunter2",
+            display_name="Tech",
+            tenant_label="Irrelevant",
+        )
+        await all_services["membership_service"].create(
+            user_id=technician_session.user.id,
+            tenant_id=session.tenant.id,
+            role=Role.TECHNICIAN,
+        )
+
+        with pytest.raises(PermissionDeniedError):
+            await auth_service.create_invite(
+                tenant_id=session.tenant.id,
+                email="new.tech@example.com",
+                role=Role.TECHNICIAN,
+                invited_by_user_id=technician_session.user.id,
+            )
+
+    async def test_inviter_without_active_membership_raises(
+        self, auth_service, email_sender
+    ):
+        session = await self._verified_owner_session(auth_service, email_sender)
+        unrelated_session = await auth_service.signup(
+            email="unrelated@example.com",
+            password="hunter2",
+            display_name="Unrelated",
+            tenant_label="Somewhere Else",
+        )
+
+        with pytest.raises(NoActiveMembershipError):
+            await auth_service.create_invite(
+                tenant_id=session.tenant.id,
+                email="new.tech@example.com",
+                role=Role.TECHNICIAN,
+                invited_by_user_id=unrelated_session.user.id,
+            )
+
+    async def test_already_member_raises(
+        self, auth_service, all_services, email_sender
+    ):
+        session = await self._verified_owner_session(auth_service, email_sender)
+        existing_member_session = await auth_service.signup(
+            email="already.here@example.com",
+            password="hunter2",
+            display_name="Already Here",
+            tenant_label="Somewhere Else",
+        )
+        await all_services["membership_service"].create(
+            user_id=existing_member_session.user.id,
+            tenant_id=session.tenant.id,
+            role=Role.TECHNICIAN,
+        )
+
+        with pytest.raises(AlreadyAMemberError):
+            await auth_service.create_invite(
+                tenant_id=session.tenant.id,
+                email="already.here@example.com",
+                role=Role.TECHNICIAN,
+                invited_by_user_id=session.user.id,
+            )
+
+    async def test_email_delivery_failure_propagates(self, all_services, email_sender):
+        """Unlike signup(), invite delivery failure must NOT be
+        suppressed — Invitation has no resend capability, so a
+        suppressed failure would leave a permanently orphaned,
+        undiscoverable invitation."""
+
+        class _FailingInviteSender:
+            async def send_verification_email(self, *, to: str, raw_token: str) -> None:
+                pass
+
+            async def send_invitation_email(
+                self, *, to: str, raw_token: str, tenant: Tenant, invited_by: User
+            ) -> None:
+                raise ConnectionError("simulated delivery failure")
+
+        working_sender = _NoopEmailSender()
+        service_with_working_sender = AuthService(
+            email_sender=working_sender, **all_services
+        )
+        owner_session = await service_with_working_sender.signup(
+            email="owner@example.com",
+            password="hunter2",
+            display_name="Owner",
+            tenant_label="Owner's Business",
+        )
+        owner_raw_token = working_sender.last_verification_token_by_email[
+            "owner@example.com"
+        ]
+        await service_with_working_sender.verify_email(raw_token=owner_raw_token)
+
+        service_with_failing_sender = AuthService(
+            email_sender=_FailingInviteSender(), **all_services
+        )
+        with pytest.raises(ConnectionError):
+            await service_with_failing_sender.create_invite(
+                tenant_id=owner_session.tenant.id,
+                email="new.tech@example.com",
+                role=Role.TECHNICIAN,
+                invited_by_user_id=owner_session.user.id,
+            )
+
+
+class TestAcceptInviteExistingUser:
+    pytestmark = pytest.mark.asyncio
+
+    async def test_successful_acceptance_adds_membership_without_new_session(
+        self, auth_service, all_services
+    ):
+        owner_session = await auth_service.signup(
+            email="owner@example.com",
+            password="hunter2",
+            display_name="Owner",
+            tenant_label="Owner's Business",
+        )
+        invitee_session = await auth_service.signup(
+            email="invitee@example.com",
+            password="hunter2",
+            display_name="Invitee",
+            tenant_label="Invitee's Own Business",
+        )
+        # Constructed via InvitationService directly for raw-token
+        # access — _NoopEmailSender only tracks recipients for
+        # invitation emails, not the token itself (unlike verification
+        # emails, which are needed by many more tests and were worth
+        # the extra tracking).
+        _invitation, raw_invite_token = await all_services["invitation_service"].create(
+            tenant_id=owner_session.tenant.id,
+            email="invitee@example.com",
+            role=Role.DISPATCHER,
+            invited_by_user_id=owner_session.user.id,
+        )
+
+        result = await auth_service.accept_invite_existing_user(
+            raw_token=raw_invite_token,
+            authenticated_user_id=invitee_session.user.id,
+        )
+
+        assert result.tenant.id == owner_session.tenant.id
+        assert result.membership.role == Role.DISPATCHER
+        assert result.membership.user_id == invitee_session.user.id
+        assert result.invitation.status.value == "accepted"
+
+        # No new session was minted — the invitee's ORIGINAL refresh
+        # token (from their own signup) must still work, and their
+        # active tenant context must be unchanged; accepting an invite
+        # must not silently switch it.
+        refreshed = await auth_service.refresh(
+            raw_refresh_token=invitee_session.raw_refresh_token
+        )
+        assert refreshed.tenant.id == invitee_session.tenant.id
+
+    async def test_email_mismatch_raises(self, auth_service, all_services):
+        owner_session = await auth_service.signup(
+            email="owner@example.com",
+            password="hunter2",
+            display_name="Owner",
+            tenant_label="Owner's Business",
+        )
+        _invitation, raw_invite_token = await all_services["invitation_service"].create(
+            tenant_id=owner_session.tenant.id,
+            email="intended@example.com",
+            role=Role.TECHNICIAN,
+            invited_by_user_id=owner_session.user.id,
+        )
+        someone_else_session = await auth_service.signup(
+            email="someone.else@example.com",
+            password="hunter2",
+            display_name="Someone Else",
+            tenant_label="Different Business",
+        )
+
+        with pytest.raises(InvitationEmailMismatchError):
+            await auth_service.accept_invite_existing_user(
+                raw_token=raw_invite_token,
+                authenticated_user_id=someone_else_session.user.id,
+            )
+
+    async def test_invalid_token_propagates(self, auth_service):
+        with pytest.raises(InvitationInvalidError):
+            await auth_service.accept_invite_existing_user(
+                raw_token="not-a-real-token", authenticated_user_id=uuid4()
+            )
+
+
+class TestAcceptInviteNewUser:
+    pytestmark = pytest.mark.asyncio
+
+    async def test_successful_acceptance_creates_verified_user_and_session(
+        self, auth_service, all_services
+    ):
+        owner_session = await auth_service.signup(
+            email="owner@example.com",
+            password="hunter2",
+            display_name="Owner",
+            tenant_label="Owner's Business",
+        )
+        invitation, raw_invite_token = await all_services["invitation_service"].create(
+            tenant_id=owner_session.tenant.id,
+            email="new.invitee@example.com",
+            role=Role.TECHNICIAN,
+            invited_by_user_id=owner_session.user.id,
+        )
+
+        session = await auth_service.accept_invite_new_user(
+            raw_token=raw_invite_token, password="hunter2", display_name="Invitee"
+        )
+
+        assert session.user.email == "new.invitee@example.com"
+        assert session.user.email_verified is True  # Invariant 9
+        assert session.tenant.id == owner_session.tenant.id
+        assert session.membership.role == Role.TECHNICIAN
+        assert session.access_token
+        assert session.raw_refresh_token
+
+    async def test_invalid_token_propagates(self, auth_service):
+        with pytest.raises(InvitationInvalidError):
+            await auth_service.accept_invite_new_user(
+                raw_token="not-a-real-token",
+                password="hunter2",
+                display_name="Invitee",
+            )
+
+    async def test_duplicate_email_propagates(self, auth_service, all_services):
+        owner_session = await auth_service.signup(
+            email="owner@example.com",
+            password="hunter2",
+            display_name="Owner",
+            tenant_label="Owner's Business",
+        )
+        await auth_service.signup(
+            email="already.exists@example.com",
+            password="hunter2",
+            display_name="Existing",
+            tenant_label="Somewhere Else",
+        )
+        invitation, raw_invite_token = await all_services["invitation_service"].create(
+            tenant_id=owner_session.tenant.id,
+            email="already.exists@example.com",
+            role=Role.TECHNICIAN,
+            invited_by_user_id=owner_session.user.id,
+        )
+
+        with pytest.raises(EmailAlreadyRegisteredError):
+            await auth_service.accept_invite_new_user(
+                raw_token=raw_invite_token, password="hunter2", display_name="Dupe"
+            )
 
 
 class TestConstruction:
