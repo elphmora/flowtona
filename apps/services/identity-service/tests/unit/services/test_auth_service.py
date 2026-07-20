@@ -6,10 +6,13 @@ Covers:
 - signup()
 - login()
 - select_tenant()
+- refresh()
+- logout()
+- logout_all_for_tenant()
 - constructor/DI wiring
 
-The remaining workflows (refresh, logout, logout_all_for_tenant, email
-verification, invitations) are intentionally implemented and tested in
+The remaining workflows (email verification, resend, and both invite-
+acceptance variants) are intentionally implemented and tested in
 subsequent PRs.
 """
 
@@ -20,6 +23,10 @@ import pytest
 from app.constants.roles import Role
 from app.exceptions.auth import InvalidCredentialsError, NoActiveMembershipError
 from app.exceptions.base import IdentityInvariantError
+from app.exceptions.refresh_token import (
+    InvalidRefreshTokenError,
+    RefreshTokenReuseDetectedError,
+)
 from app.exceptions.token import InvalidPreauthTokenError
 from app.exceptions.user import EmailAlreadyRegisteredError
 from app.models.tenant import Tenant
@@ -402,6 +409,209 @@ class TestSelectTenant:
             await auth_service.select_tenant(
                 preauth_token=preauth_token, tenant_id=tenant.id
             )
+
+
+class TestRefresh:
+    pytestmark = pytest.mark.asyncio
+
+    async def test_returns_new_tokens(self, auth_service):
+        session = await auth_service.signup(
+            email="dana@example.com",
+            password="hunter2",
+            display_name="Dana",
+            tenant_label="Dana's Plumbing",
+        )
+
+        refreshed = await auth_service.refresh(
+            raw_refresh_token=session.raw_refresh_token
+        )
+
+        assert refreshed.raw_refresh_token != session.raw_refresh_token
+        assert refreshed.access_token != session.access_token
+        assert refreshed.user.id == session.user.id
+        assert refreshed.tenant.id == session.tenant.id
+
+    async def test_reflects_current_permissions_version(
+        self, auth_service, all_services
+    ):
+        """Refresh must use CURRENT membership state, not whatever was
+        true at original login — simulated by bumping
+        permissions_version directly (verify_email(), which would do
+        this via the real workflow, isn't implemented until PR 4)."""
+        session = await auth_service.signup(
+            email="dana@example.com",
+            password="hunter2",
+            display_name="Dana",
+            tenant_label="Dana's Plumbing",
+        )
+        assert session.membership.permissions_version == 0
+
+        await all_services["membership_service"].bump_permissions_version_for_user(
+            user_id=session.user.id
+        )
+
+        refreshed = await auth_service.refresh(
+            raw_refresh_token=session.raw_refresh_token
+        )
+        assert refreshed.membership.permissions_version == 1
+
+        claims = await all_services["token_service"].verify_access_token(
+            token=refreshed.access_token
+        )
+        assert claims.permissions_version == 1
+
+    async def test_invalid_token_propagates(self, auth_service):
+        with pytest.raises(InvalidRefreshTokenError):
+            await auth_service.refresh(raw_refresh_token="not-a-real-token")
+
+    async def test_reused_token_propagates_reuse_detected(self, auth_service):
+        session = await auth_service.signup(
+            email="dana@example.com",
+            password="hunter2",
+            display_name="Dana",
+            tenant_label="Dana's Plumbing",
+        )
+        await auth_service.refresh(raw_refresh_token=session.raw_refresh_token)
+
+        # Reusing the OLD (now-rotated) token — the actual theft scenario.
+        with pytest.raises(RefreshTokenReuseDetectedError):
+            await auth_service.refresh(raw_refresh_token=session.raw_refresh_token)
+
+    async def test_missing_membership_revokes_family_and_raises(
+        self, auth_service, all_services
+    ):
+        """Constructed through public APIs: RefreshTokenService.issue()
+        doesn't check that a membership exists for the (user_id,
+        tenant_id) pair, so a refresh token can legitimately exist with
+        no corresponding membership at all.
+
+        Also verifies the compensating revoke invalidates the entire
+        family, not just the token that was checked — see the inline
+        comment below."""
+        user = await all_services["user_service"].create(
+            email="dana@example.com", password="hunter2", display_name="Dana"
+        )
+        tenant = await all_services["tenant_service"].create(
+            tenant_label="No Membership Here"
+        )
+        _record, raw_refresh_token = await all_services["refresh_token_service"].issue(
+            user_id=user.id, tenant_id=tenant.id
+        )
+
+        with pytest.raises(NoActiveMembershipError):
+            await auth_service.refresh(raw_refresh_token=raw_refresh_token)
+
+        # The compensating revoke must invalidate the entire refresh-
+        # token family. Reusing the original token afterwards should
+        # therefore fail as an invalid token rather than remaining in
+        # a reusable rotated state.
+        with pytest.raises(InvalidRefreshTokenError):
+            await auth_service.refresh(raw_refresh_token=raw_refresh_token)
+
+    async def test_missing_user_raises_invariant_error(
+        self, auth_service, all_services
+    ):
+        """A different invariant from the missing-membership case above
+        — here the membership genuinely exists and is active, but the
+        user_id it (and the refresh token) references was never
+        actually created. Constructed through public APIs: none of
+        RefreshTokenService.issue(), MembershipService.create() check
+        that user_id refers to a real user."""
+        fake_user_id = uuid4()
+        tenant = await all_services["tenant_service"].create(
+            tenant_label="Some Business"
+        )
+        await all_services["membership_service"].create(
+            user_id=fake_user_id, tenant_id=tenant.id, role=Role.OWNER
+        )
+        _record, raw_refresh_token = await all_services["refresh_token_service"].issue(
+            user_id=fake_user_id, tenant_id=tenant.id
+        )
+
+        with pytest.raises(IdentityInvariantError):
+            await auth_service.refresh(raw_refresh_token=raw_refresh_token)
+
+    async def test_missing_tenant_raises_invariant_error(
+        self, auth_service, all_services
+    ):
+        """Symmetric to the missing-user case — the membership is
+        active and references a real user, but the tenant_id it (and
+        the refresh token) references was never actually created."""
+        user = await all_services["user_service"].create(
+            email="dana@example.com", password="hunter2", display_name="Dana"
+        )
+        fake_tenant_id = uuid4()
+        await all_services["membership_service"].create(
+            user_id=user.id, tenant_id=fake_tenant_id, role=Role.OWNER
+        )
+        _record, raw_refresh_token = await all_services["refresh_token_service"].issue(
+            user_id=user.id, tenant_id=fake_tenant_id
+        )
+
+        with pytest.raises(IdentityInvariantError):
+            await auth_service.refresh(raw_refresh_token=raw_refresh_token)
+
+
+class TestLogout:
+    pytestmark = pytest.mark.asyncio
+
+    async def test_revokes_the_session(self, auth_service):
+        session = await auth_service.signup(
+            email="dana@example.com",
+            password="hunter2",
+            display_name="Dana",
+            tenant_label="Dana's Plumbing",
+        )
+
+        await auth_service.logout(raw_refresh_token=session.raw_refresh_token)
+
+        with pytest.raises(InvalidRefreshTokenError):
+            await auth_service.refresh(raw_refresh_token=session.raw_refresh_token)
+
+    async def test_is_idempotent_for_unknown_token(self, auth_service):
+        await auth_service.logout(raw_refresh_token="never-issued")  # no raise
+
+
+class TestLogoutAllForTenant:
+    pytestmark = pytest.mark.asyncio
+
+    async def test_revokes_all_sessions_for_tenant_only(
+        self, auth_service, all_services
+    ):
+        session = await auth_service.signup(
+            email="dana@example.com",
+            password="hunter2",
+            display_name="Dana",
+            tenant_label="Dana's Plumbing",
+        )
+        # A second session (device) for the same user, same tenant.
+        await all_services["refresh_token_service"].issue(
+            user_id=session.user.id, tenant_id=session.tenant.id
+        )
+        # A session in a DIFFERENT tenant for the same user — must be
+        # left untouched.
+        other_tenant = await all_services["tenant_service"].create(
+            tenant_label="Second Business"
+        )
+        await all_services["membership_service"].create(
+            user_id=session.user.id, tenant_id=other_tenant.id, role=Role.TECHNICIAN
+        )
+        _, other_tenant_raw_token = await all_services["refresh_token_service"].issue(
+            user_id=session.user.id, tenant_id=other_tenant.id
+        )
+
+        count = await auth_service.logout_all_for_tenant(
+            user_id=session.user.id, tenant_id=session.tenant.id
+        )
+        assert count == 2  # the signup session + the second device session
+
+        with pytest.raises(InvalidRefreshTokenError):
+            await auth_service.refresh(raw_refresh_token=session.raw_refresh_token)
+
+        # Untouched — a subsequent refresh in the OTHER tenant must
+        # still succeed.
+        refreshed = await auth_service.refresh(raw_refresh_token=other_tenant_raw_token)
+        assert refreshed.tenant.id == other_tenant.id
 
 
 class TestConstruction:

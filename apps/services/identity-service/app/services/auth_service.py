@@ -12,12 +12,12 @@ codebase: repositories own persistence and atomic state transitions,
 entity services own aggregate-specific business rules, AuthService
 owns workflows spanning more than one of them.
 
-PR scope: signup(), login(), select_tenant() only. The remaining seven
-methods stay NotImplementedError stubs, filled in across the follow-up
-PRs already agreed (refresh/logout/logout-all; email verification;
-invitations) — a single PR covering all ten methods at once would be
-unreviewable, given how much review churn every individual service in
-this build has gone through.
+PR scope: signup(), login(), select_tenant(), refresh(), logout(), and
+logout_all_for_tenant(). The remaining four methods (email verification,
+resend, and both invite-acceptance variants) stay NotImplementedError
+stubs, filled in across the follow-up PRs already agreed — a single PR
+covering all ten methods at once would be unreviewable, given how much
+review churn every individual service in this build has gone through.
 
 KNOWN GAPS, not solved anywhere in this codebase yet:
 - Rate limiting (Decision 12) is intentionally handled outside this
@@ -236,21 +236,77 @@ class AuthService:
         """Flow 4. RefreshTokenService.rotate() first — the only way to
         learn user_id/tenant_id from an opaque refresh token (Decision
         3) without a repository lookup, and rotate()'s own atomic guard
-        is the real race-safety mechanism regardless of ordering. Then
-        a FRESH MembershipService lookup — role/permissions_version
+        is the real race-safety mechanism regardless of ordering.
+        Invalid, expired, or reused tokens raise straight out of
+        rotate() (InvalidRefreshTokenError, RefreshTokenReuseDetectedError)
+        — not caught or wrapped here, they're already correctly-shaped
+        domain exceptions.
+
+        Then a FRESH MembershipService lookup — role/permissions_version
         live on TenantMembership, not RefreshTokenRecord, so refresh
         must reflect current permissions, not whatever was true at
         original login.
 
         If the membership is inactive after rotation, the refresh-token
         family is revoked before the operation fails — no valid session
-        survives a revoked membership."""
-        raise NotImplementedError("Implemented in a follow-up PR")
+        survives a revoked membership.
+
+        Deliberately does NOT use _issue_session() — that helper always
+        starts a brand-new refresh-token family, which would be wrong
+        here: refresh() must reuse the token rotate() already produced,
+        not mint an unrelated second one."""
+        record, new_raw_refresh_token = await self._refresh_token_service.rotate(
+            raw_token=raw_refresh_token
+        )
+
+        membership = await self._membership_service.get_by_user_and_tenant(
+            user_id=record.user_id, tenant_id=record.tenant_id
+        )
+        if membership is None or membership.status != MembershipStatus.ACTIVE:
+            # revoke_current_session() revokes the WHOLE family — both
+            # the just-rotated old token and the new successor rotate()
+            # just created — not just the successor in isolation.
+            # Verified against RefreshTokenService.revoke_family()'s
+            # own contract: "every non-revoked row in the family,
+            # including the active leaf and rotated ancestors."
+            await self._refresh_token_service.revoke_current_session(
+                raw_token=new_raw_refresh_token
+            )
+            raise NoActiveMembershipError()
+
+        user = await self._user_service.get_by_id(user_id=record.user_id)
+        if user is None:
+            raise IdentityInvariantError(
+                f"Refresh token references missing user {record.user_id}"
+            )
+        tenant = await self._tenant_service.get_by_id(tenant_id=record.tenant_id)
+        if tenant is None:
+            raise IdentityInvariantError(
+                f"Refresh token references missing tenant {record.tenant_id}"
+            )
+
+        access_token = await self._token_service.issue_access_token(
+            user_id=user.id,
+            tenant_id=tenant.id,
+            role=membership.role,
+            permissions_version=membership.permissions_version,
+        )
+        return AuthenticatedSession(
+            user=user,
+            tenant=tenant,
+            membership=membership,
+            access_token=access_token,
+            raw_refresh_token=new_raw_refresh_token,
+        )
 
     async def logout(self, *, raw_refresh_token: str) -> None:
         """Flow 9. Thin delegation to
-        RefreshTokenService.revoke_current_session()."""
-        raise NotImplementedError("Implemented in a follow-up PR")
+        RefreshTokenService.revoke_current_session() — already
+        idempotent (missing or already-revoked tokens are a no-op, not
+        an error), so this needs no additional handling here."""
+        await self._refresh_token_service.revoke_current_session(
+            raw_token=raw_refresh_token
+        )
 
     async def logout_all_for_tenant(self, *, user_id: UUID, tenant_id: UUID) -> int:
         """Flow 10. Revokes every session for this user WITHIN this
@@ -258,7 +314,9 @@ class AuthService:
         come from the caller's own verified access token (route/
         middleware layer), never raw client input. Thin delegation to
         RefreshTokenService.revoke_all_for_tenant()."""
-        raise NotImplementedError("Implemented in a follow-up PR")
+        return await self._refresh_token_service.revoke_all_for_tenant(
+            user_id=user_id, tenant_id=tenant_id
+        )
 
     async def verify_email(self, *, raw_token: str) -> None:
         """Flow 1 continuation. EmailVerificationService.verify()
