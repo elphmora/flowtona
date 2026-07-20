@@ -9,11 +9,12 @@ Covers:
 - refresh()
 - logout()
 - logout_all_for_tenant()
+- verify_email()
+- resend_verification_email()
 - constructor/DI wiring
 
-The remaining workflows (email verification, resend, and both invite-
-acceptance variants) are intentionally implemented and tested in
-subsequent PRs.
+The remaining workflows (both invite-acceptance variants) are
+intentionally implemented and tested in the final follow-up PR.
 """
 
 from uuid import uuid4
@@ -23,6 +24,7 @@ import pytest
 from app.constants.roles import Role
 from app.exceptions.auth import InvalidCredentialsError, NoActiveMembershipError
 from app.exceptions.base import IdentityInvariantError
+from app.exceptions.email_verification import VerificationTokenInvalidError
 from app.exceptions.refresh_token import (
     InvalidRefreshTokenError,
     RefreshTokenReuseDetectedError,
@@ -50,14 +52,17 @@ class _NoopEmailSender:
     """Stand-in AuthEmailSender for tests — no real implementation
     exists yet (see auth_email_sender.py's module docstring). Tracks
     what was "sent" so tests can assert on it without a real email
-    backend."""
+    backend, including the raw token itself (needed to actually call
+    verify_email() with something real in later tests)."""
 
     def __init__(self) -> None:
         self.verification_emails_sent: list[str] = []
         self.invitation_emails_sent: list[str] = []
+        self.last_verification_token_by_email: dict[str, str] = {}
 
     async def send_verification_email(self, *, to: str, raw_token: str) -> None:
         self.verification_emails_sent.append(to)
+        self.last_verification_token_by_email[to] = raw_token
 
     async def send_invitation_email(
         self, *, to: str, raw_token: str, tenant: Tenant, invited_by: User
@@ -612,6 +617,133 @@ class TestLogoutAllForTenant:
         # still succeed.
         refreshed = await auth_service.refresh(raw_refresh_token=other_tenant_raw_token)
         assert refreshed.tenant.id == other_tenant.id
+
+
+class TestVerifyEmail:
+    pytestmark = pytest.mark.asyncio
+
+    async def test_marks_user_verified_and_bumps_permissions_version(
+        self, auth_service, email_sender
+    ):
+        session = await auth_service.signup(
+            email="dana@example.com",
+            password="hunter2",
+            display_name="Dana",
+            tenant_label="Dana's Plumbing",
+        )
+        assert session.user.email_verified is False
+        raw_token = email_sender.last_verification_token_by_email["dana@example.com"]
+
+        await auth_service.verify_email(raw_token=raw_token)
+
+        # verify_email() returns None — confirm the effects via a fresh
+        # refresh(), which does its own independent membership/user
+        # lookup, proving the changes actually persisted rather than
+        # trusting a return value that doesn't exist.
+        refreshed = await auth_service.refresh(
+            raw_refresh_token=session.raw_refresh_token
+        )
+        assert refreshed.user.email_verified is True
+        assert refreshed.membership.permissions_version == 1
+
+    async def test_does_not_invalidate_existing_session(
+        self, auth_service, all_services, email_sender
+    ):
+        """Invariant 15: verifying an email must never invalidate an
+        existing session. The ORIGINAL access token, issued before
+        verification, must still verify successfully afterward — and
+        still carries the OLD permissions_version, since new
+        permissions apply from the next refresh() onward, not
+        immediately."""
+        session = await auth_service.signup(
+            email="dana@example.com",
+            password="hunter2",
+            display_name="Dana",
+            tenant_label="Dana's Plumbing",
+        )
+        raw_token = email_sender.last_verification_token_by_email["dana@example.com"]
+
+        await auth_service.verify_email(raw_token=raw_token)
+
+        claims = await all_services["token_service"].verify_access_token(
+            token=session.access_token
+        )
+        assert claims.permissions_version == 0
+
+    async def test_invalid_token_propagates(self, auth_service):
+        with pytest.raises(VerificationTokenInvalidError):
+            await auth_service.verify_email(raw_token="not-a-real-token")
+
+    async def test_already_consumed_token_propagates(self, auth_service, email_sender):
+        await auth_service.signup(
+            email="dana@example.com",
+            password="hunter2",
+            display_name="Dana",
+            tenant_label="Dana's Plumbing",
+        )
+        raw_token = email_sender.last_verification_token_by_email["dana@example.com"]
+        await auth_service.verify_email(raw_token=raw_token)
+
+        with pytest.raises(VerificationTokenInvalidError):
+            await auth_service.verify_email(raw_token=raw_token)
+
+
+class TestResendVerificationEmail:
+    pytestmark = pytest.mark.asyncio
+
+    async def test_sends_new_token_and_invalidates_old(
+        self, auth_service, email_sender
+    ):
+        session = await auth_service.signup(
+            email="dana@example.com",
+            password="hunter2",
+            display_name="Dana",
+            tenant_label="Dana's Plumbing",
+        )
+        old_raw_token = email_sender.last_verification_token_by_email[
+            "dana@example.com"
+        ]
+
+        await auth_service.resend_verification_email(user_id=session.user.id)
+
+        new_raw_token = email_sender.last_verification_token_by_email[
+            "dana@example.com"
+        ]
+        assert new_raw_token != old_raw_token
+
+        with pytest.raises(VerificationTokenInvalidError):
+            await auth_service.verify_email(raw_token=old_raw_token)
+
+        await auth_service.verify_email(raw_token=new_raw_token)  # does not raise
+
+    async def test_missing_user_raises_invariant_error(self, auth_service):
+        with pytest.raises(IdentityInvariantError):
+            await auth_service.resend_verification_email(user_id=uuid4())
+
+    async def test_email_delivery_failure_propagates(self, all_services):
+        """Unlike signup(), resend's delivery failure must NOT be
+        suppressed — the operation's entire purpose is sending this one
+        email, so the caller needs to know it failed."""
+
+        class _FailingEmailSender:
+            async def send_verification_email(self, *, to: str, raw_token: str) -> None:
+                raise ConnectionError("simulated delivery failure")
+
+            async def send_invitation_email(
+                self, *, to: str, raw_token: str, tenant: Tenant, invited_by: User
+            ) -> None:
+                pass
+
+        service = AuthService(email_sender=_FailingEmailSender(), **all_services)
+        session = await service.signup(
+            email="dana@example.com",
+            password="hunter2",
+            display_name="Dana",
+            tenant_label="Dana's Plumbing",
+        )  # signup itself succeeds despite the failing sender (suppressed there)
+
+        with pytest.raises(ConnectionError):
+            await service.resend_verification_email(user_id=session.user.id)
 
 
 class TestConstruction:
