@@ -5,7 +5,8 @@ requests through a real FastAPI app, a real (in-memory) AuthService,
 and real RFC 9457 error responses — not just unit tests of route
 functions in isolation.
 
-Covers the account-entry and session-lifecycle HTTP endpoints.
+Covers the account-entry, session-lifecycle, and email-verification
+HTTP endpoints.
 Verification and invitation routes are added in their own PRs.
 
 Tests needing to set up extra state directly via `registry` (e.g. a
@@ -435,6 +436,102 @@ class TestLogoutAllForTenant:
 
         assert response.status_code == 401
         assert response.json()["code"] == "invalid_access_token"
+
+
+class TestVerifyEmail:
+    pytestmark = pytest.mark.asyncio
+
+    async def test_verifies_and_returns_204(self, client, registry):
+        signup_body = signup(client).json()
+        user_id = UUID(signup_body["user"]["id"])
+        # resend() returns the raw token directly, allowing the HTTP
+        # test to exercise verification without intercepting the real
+        # email sender.
+        raw_token = await registry.email_verification_service.resend(
+            user_id=user_id, email="dana@example.com"
+        )
+
+        response = client.post("/v1/auth/verify-email", json={"token": raw_token})
+
+        assert response.status_code == 204
+        assert response.text == ""
+
+        refreshed = client.post(
+            "/v1/auth/refresh",
+            json={"refresh_token": signup_body["refresh_token"]},
+        ).json()
+        assert refreshed["user"]["email_verified"] is True
+
+    async def test_invalid_token_returns_400(self, client):
+        response = client.post(
+            "/v1/auth/verify-email", json={"token": "not-a-real-token"}
+        )
+
+        assert response.status_code == 400
+        assert response.json()["code"] == "invalid_verification_token"
+
+    async def test_already_consumed_token_returns_400(self, client, registry):
+        """Deliberately expects the SAME code as test_invalid_token_
+        returns_400 — EmailVerificationService reuses one exception for
+        both a garbage token and an already-consumed one (the client-
+        facing outcome, "this token doesn't work," is identical either
+        way). Asserting the code explicitly still protects against a
+        future accidental change, even though it's not distinguishing
+        two different values here."""
+        signup_body = signup(client).json()
+        user_id = UUID(signup_body["user"]["id"])
+        raw_token = await registry.email_verification_service.resend(
+            user_id=user_id, email="dana@example.com"
+        )
+        client.post("/v1/auth/verify-email", json={"token": raw_token})
+
+        response = client.post("/v1/auth/verify-email", json={"token": raw_token})
+
+        assert response.status_code == 400
+        assert response.json()["code"] == "invalid_verification_token"
+
+    async def test_empty_token_returns_validation_error(self, client):
+        response = client.post("/v1/auth/verify-email", json={"token": ""})
+
+        assert response.status_code == 422
+
+
+class TestResendVerification:
+    pytestmark = pytest.mark.asyncio
+
+    async def test_returns_204(self, client):
+        signup_body = signup(client).json()
+
+        response = client.post(
+            "/v1/auth/resend-verification",
+            headers={"Authorization": f"Bearer {signup_body['access_token']}"},
+        )
+
+        assert response.status_code == 204
+        assert response.text == ""
+
+    async def test_missing_bearer_token_returns_401(self, client):
+        response = client.post("/v1/auth/resend-verification")
+
+        assert response.status_code == 401
+        assert response.json()["code"] == "invalid_access_token"
+
+    async def test_resend_invalidates_previous_token(self, client, registry):
+        signup_body = signup(client).json()
+        user_id = UUID(signup_body["user"]["id"])
+        old_token = await registry.email_verification_service.resend(
+            user_id=user_id, email="dana@example.com"
+        )
+
+        client.post(
+            "/v1/auth/resend-verification",
+            headers={"Authorization": f"Bearer {signup_body['access_token']}"},
+        )
+
+        response = client.post("/v1/auth/verify-email", json={"token": old_token})
+
+        assert response.status_code == 400
+        assert response.json()["code"] == "invalid_verification_token"
 
 
 class TestFullAccountEntryJourney:

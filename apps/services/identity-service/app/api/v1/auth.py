@@ -24,6 +24,7 @@ from app.api.schemas.auth import (
     RefreshRequest,
     SelectTenantRequest,
     SignupRequest,
+    VerifyEmailRequest,
 )
 from app.security.token_models import AccessTokenClaims
 from app.services.auth_models import AuthenticatedSession
@@ -117,3 +118,30 @@ async def logout_all_for_tenant(
         user_id=claims.user_id, tenant_id=claims.tenant_id
     )
     return LogoutAllResponse(revoked_count=revoked_count)
+
+
+# --- Email verification ---
+
+
+@router.post("/verify-email", status_code=status.HTTP_204_NO_CONTENT)
+async def verify_email(
+    body: VerifyEmailRequest,
+    auth_service: AuthService = Depends(get_auth_service),
+) -> None:
+    """Public — no authentication required. Possessing the raw token
+    from the verification email is itself the proof needed here, the
+    same reasoning select-tenant already applies to its own token."""
+    await auth_service.verify_email(raw_token=body.token)
+
+
+@router.post("/resend-verification", status_code=status.HTTP_204_NO_CONTENT)
+async def resend_verification(
+    claims: AccessTokenClaims = Depends(get_current_claims),
+    auth_service: AuthService = Depends(get_auth_service),
+) -> None:
+    """Authenticated, not public — the soft gate means the caller is
+    already logged in and simply hasn't verified yet, so this takes
+    user_id from the verified access token rather than a bare email
+    address, which would let anyone probe whether an arbitrary address
+    has an account."""
+    await auth_service.resend_verification_email(user_id=claims.user_id)
