@@ -2,12 +2,12 @@
 app/api/schemas/auth.py
 
 HTTP request/response schemas for signup, login, tenant selection,
-refresh, and logout. Domain models never get serialized directly to a
-client — every response here is a dedicated projection (User carries
-password_hash, which must never leave the service boundary).
+refresh, logout, and email verification. Domain models never get
+serialized directly to a client — every response here is a dedicated
+projection (User carries password_hash, which must never leave the
+service boundary).
 
-Scoped to exactly what these route PRs need. Verification and
-invitation schemas are added in their own PRs, alongside the routes
+Invitation schemas are added in their own PR, alongside the routes
 that actually use them.
 """
 
@@ -124,3 +124,7 @@ class LogoutRequest(BaseModel):
     refresh_token: Annotated[
         str, StringConstraints(strip_whitespace=True, min_length=1)
     ]
+
+
+class VerifyEmailRequest(BaseModel):
+    token: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
