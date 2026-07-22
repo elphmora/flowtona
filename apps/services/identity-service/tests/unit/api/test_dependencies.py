@@ -7,10 +7,26 @@ import pytest
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
-from app.api.dependencies import build_auth_service, get_auth_service
+from app.api.dependencies import (
+    ServiceRegistry,
+    build_auth_service,
+    build_services,
+    get_auth_service,
+    get_token_service,
+)
+from app.constants.roles import Role
 from app.core.config import Settings
 from app.exceptions.auth import InvalidCredentialsError
+from app.services.auth_models import AuthenticatedSession
 from app.services.auth_service import AuthService
+from app.services.email_verification_service import EmailVerificationService
+from app.services.invitation_service import InvitationService
+from app.services.membership_service import MembershipService
+from app.services.permission_service import PermissionService
+from app.services.refresh_token_service import RefreshTokenService
+from app.services.tenant_service import TenantService
+from app.services.token_service import TokenService
+from app.services.user_service import UserService
 from scripts.generate_signing_keypair import generate_keypair
 
 
@@ -102,6 +118,81 @@ class TestBuildAuthService:
             )
 
 
+class TestBuildServices:
+    def test_registry_contains_expected_services(self, tmp_path):
+        registry = build_services(Settings(SECRETS_DIR=tmp_path))
+
+        assert isinstance(registry, ServiceRegistry)
+        assert isinstance(registry.user_service, UserService)
+        assert isinstance(registry.tenant_service, TenantService)
+        assert isinstance(registry.membership_service, MembershipService)
+        assert isinstance(registry.email_verification_service, EmailVerificationService)
+        assert isinstance(registry.invitation_service, InvitationService)
+        assert isinstance(registry.refresh_token_service, RefreshTokenService)
+        assert isinstance(registry.token_service, TokenService)
+        assert isinstance(registry.permission_service, PermissionService)
+        assert isinstance(registry.auth_service, AuthService)
+
+    def test_two_calls_produce_independent_registries(self, tmp_path):
+        """Complements TestBuildAuthService's behavioral isolation test
+        (which proves independence via a failed cross-service login)
+        with a direct identity check on the registry and its services
+        themselves — two calls must never share a single instance of
+        anything."""
+        settings = Settings(SECRETS_DIR=tmp_path)
+
+        registry_1 = build_services(settings)
+        registry_2 = build_services(settings)
+
+        assert registry_1 is not registry_2
+        assert registry_1.auth_service is not registry_2.auth_service
+        assert registry_1.user_service is not registry_2.user_service
+        assert registry_1.token_service is not registry_2.token_service
+
+    @pytest.mark.asyncio
+    async def test_registry_services_share_one_store(self, tmp_path):
+        """Create state through individual registry services and
+        consume it through AuthService, proving they share the same
+        repository graph."""
+        generate_keypair(tmp_path)
+        registry = build_services(Settings(SECRETS_DIR=tmp_path))
+
+        user = await registry.user_service.create(
+            email="dana@example.com", password="hunter2", display_name="Dana"
+        )
+        tenant = await registry.tenant_service.create(tenant_label="Dana's Plumbing")
+        await registry.membership_service.create(
+            user_id=user.id, tenant_id=tenant.id, role=Role.OWNER
+        )
+
+        result = await registry.auth_service.login(
+            email="dana@example.com", password="hunter2"
+        )
+
+        assert isinstance(result, AuthenticatedSession)
+        assert result.user.id == user.id
+        assert result.tenant.id == tenant.id
+
+    @pytest.mark.asyncio
+    async def test_registry_token_service_verifies_auth_service_tokens(self, tmp_path):
+        """Verify that access tokens issued through AuthService are
+        accepted by the TokenService exposed by the same registry."""
+        generate_keypair(tmp_path)
+        registry = build_services(Settings(SECRETS_DIR=tmp_path))
+
+        session = await registry.auth_service.signup(
+            email="dana@example.com",
+            password="hunter2",
+            display_name="Dana",
+            tenant_label="Dana's Plumbing",
+        )
+
+        claims = await registry.token_service.verify_access_token(
+            token=session.access_token
+        )
+        assert claims.user_id == session.user.id
+
+
 class TestGetAuthService:
     def test_returns_the_instance_attached_to_app_state(self, tmp_path):
         """Minimal integration test — confirms the dependency actually
@@ -121,4 +212,29 @@ class TestGetAuthService:
         client = TestClient(app)
         response = client.get("/probe")
 
+        assert response.status_code == 200
+        assert response.json()["is_expected_instance"] is True
+
+
+class TestGetTokenService:
+    def test_returns_the_instance_attached_to_app_state(self, tmp_path):
+        """Mirrors TestGetAuthService, for the token_service provider —
+        proves identity (the exact same instance), not just type, which
+        is what actually confirms the provider reads from app.state
+        rather than constructing a new TokenService per request."""
+        generate_keypair(tmp_path)
+        settings = Settings(SECRETS_DIR=tmp_path)
+        registry = build_services(settings)
+
+        app = FastAPI()
+        app.state.token_service = registry.token_service
+
+        @app.get("/probe")
+        async def _probe(token_service: TokenService = Depends(get_token_service)):
+            return {"is_expected_instance": token_service is registry.token_service}
+
+        client = TestClient(app)
+        response = client.get("/probe")
+
+        assert response.status_code == 200
         assert response.json()["is_expected_instance"] is True
