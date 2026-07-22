@@ -1,7 +1,7 @@
 """
 app/api/dependencies.py
 
-Builds the shared service graph once (see build_auth_service(), called
+Builds the shared service graph once (see build_services(), called
 from main.py's lifespan handler at startup) and exposes FastAPI
 dependency providers that route handlers use via Depends() — routes
 never construct services themselves.
@@ -9,7 +9,18 @@ never construct services themselves.
 One InMemoryIdentityStore shared across every repository, exactly like
 every test in this codebase already does — the only difference is this
 happens once at process startup instead of once per test.
+
+ServiceRegistry holds every constructed service, not just AuthService
+— needed so a dependency like get_token_service() can read TokenService
+directly from app.state, rather than reaching into AuthService's
+private _token_service attribute (a real encapsulation violation).
+build_auth_service() stays as a thin wrapper around build_services()
+specifically so its existing signature/behavior/tests are unaffected
+by this — it's not being replaced, just no longer the only thing this
+module can produce.
 """
+
+from dataclasses import dataclass
 
 from fastapi import Request
 
@@ -42,7 +53,20 @@ from app.services.token_service import TokenService
 from app.services.user_service import UserService
 
 
-# build_auth_service() takes `settings` as an explicit parameter rather
+@dataclass(frozen=True, slots=True)
+class ServiceRegistry:
+    user_service: UserService
+    tenant_service: TenantService
+    membership_service: MembershipService
+    email_verification_service: EmailVerificationService
+    invitation_service: InvitationService
+    refresh_token_service: RefreshTokenService
+    token_service: TokenService
+    permission_service: PermissionService
+    auth_service: AuthService
+
+
+# build_services() takes `settings` as an explicit parameter rather
 # than importing the global `settings` singleton (the pattern every
 # other service in this codebase correctly uses) — this function's
 # whole purpose is being directly unit-testable with a DIFFERENT
@@ -55,8 +79,8 @@ from app.services.user_service import UserService
 # services -> orchestration) — one function for now, not split into
 # separate helpers, since eight services still reads fine as one
 # block. Worth splitting once this grows toward fifteen-plus services.
-def build_auth_service(settings: Settings) -> AuthService:
-    """Build the application's AuthService object graph."""
+def build_services(settings: Settings) -> ServiceRegistry:
+    """Build the application's full service object graph."""
 
     # --- Repositories (one shared store) ---
     store = InMemoryIdentityStore()
@@ -82,7 +106,7 @@ def build_auth_service(settings: Settings) -> AuthService:
     email_sender = LoggingEmailSender()
 
     # --- Orchestration ---
-    return AuthService(
+    auth_service = AuthService(
         user_service=user_service,
         tenant_service=tenant_service,
         membership_service=membership_service,
@@ -94,7 +118,31 @@ def build_auth_service(settings: Settings) -> AuthService:
         email_sender=email_sender,
     )
 
+    return ServiceRegistry(
+        user_service=user_service,
+        tenant_service=tenant_service,
+        membership_service=membership_service,
+        email_verification_service=email_verification_service,
+        invitation_service=invitation_service,
+        refresh_token_service=refresh_token_service,
+        token_service=token_service,
+        permission_service=permission_service,
+        auth_service=auth_service,
+    )
+
+
+def build_auth_service(settings: Settings) -> AuthService:
+    """Build just the AuthService — a thin wrapper around
+    build_services(), preserved as its own function since existing
+    tests and callers already depend on this exact signature."""
+    return build_services(settings).auth_service
+
 
 def get_auth_service(request: Request) -> AuthService:
     """Return the AuthService stored on application state."""
     return request.app.state.auth_service
+
+
+def get_token_service(request: Request) -> TokenService:
+    """Return the TokenService stored on application state."""
+    return request.app.state.token_service
