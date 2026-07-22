@@ -1,9 +1,12 @@
 """tests/unit/api/test_auth_routes.py
 
-End-to-end HTTP tests for the account-entry routes: real requests
-through a real FastAPI app, a real (in-memory) AuthService, and real
-RFC 9457 error responses — not just unit tests of route functions in
-isolation.
+End-to-end HTTP tests for account-entry and session routes: real
+requests through a real FastAPI app, a real (in-memory) AuthService,
+and real RFC 9457 error responses — not just unit tests of route
+functions in isolation.
+
+Covers the account-entry and session-lifecycle HTTP endpoints.
+Verification and invitation routes are added in their own PRs.
 
 Tests needing to set up extra state directly via `registry` (e.g. a
 second membership) are async, matching this codebase's established
@@ -309,6 +312,129 @@ class TestSelectTenant:
         )
 
         assert response.status_code == 403
+
+
+class TestRefresh:
+    pytestmark = pytest.mark.asyncio
+
+    async def test_returns_new_tokens(self, client):
+        signup_body = signup(client).json()
+
+        response = client.post(
+            "/v1/auth/refresh",
+            json={"refresh_token": signup_body["refresh_token"]},
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["result"] == "authenticated"
+        assert body["refresh_token"] != signup_body["refresh_token"]
+        assert body["access_token"] != signup_body["access_token"]
+        assert body["user"]["id"] == signup_body["user"]["id"]
+
+    async def test_invalid_token_returns_401(self, client):
+        response = client.post(
+            "/v1/auth/refresh", json={"refresh_token": "not-a-real-token"}
+        )
+
+        assert response.status_code == 401
+        assert response.json()["code"] == "invalid_refresh_token"
+
+    async def test_reused_token_returns_401_reuse_detected(self, client):
+        signup_body = signup(client).json()
+        client.post(
+            "/v1/auth/refresh", json={"refresh_token": signup_body["refresh_token"]}
+        )
+
+        # Reusing the OLD (now-rotated) token — the actual theft scenario.
+        response = client.post(
+            "/v1/auth/refresh", json={"refresh_token": signup_body["refresh_token"]}
+        )
+
+        assert response.status_code == 401
+        assert response.json()["code"] == "token_reuse_detected"
+
+    async def test_empty_token_returns_validation_error(self, client):
+        response = client.post("/v1/auth/refresh", json={"refresh_token": ""})
+
+        assert response.status_code == 422
+
+
+class TestLogout:
+    pytestmark = pytest.mark.asyncio
+
+    async def test_returns_204_with_no_body(self, client):
+        signup_body = signup(client).json()
+
+        response = client.post(
+            "/v1/auth/logout",
+            json={"refresh_token": signup_body["refresh_token"]},
+        )
+
+        assert response.status_code == 204
+        assert response.text == ""
+
+    async def test_revokes_the_session(self, client):
+        signup_body = signup(client).json()
+        client.post(
+            "/v1/auth/logout",
+            json={"refresh_token": signup_body["refresh_token"]},
+        )
+
+        response = client.post(
+            "/v1/auth/refresh",
+            json={"refresh_token": signup_body["refresh_token"]},
+        )
+
+        assert response.status_code == 401
+
+    async def test_is_idempotent_for_unknown_token(self, client):
+        response = client.post(
+            "/v1/auth/logout", json={"refresh_token": "never-issued"}
+        )
+
+        assert response.status_code == 204
+
+
+class TestLogoutAllForTenant:
+    pytestmark = pytest.mark.asyncio
+
+    async def test_revokes_all_sessions_for_the_tenant(self, client):
+        signup_body = signup(client).json()
+        # A second session (device) for the same account.
+        second_login = client.post(
+            "/v1/auth/login",
+            json={"email": "dana@example.com", "password": "hunter22"},
+        ).json()
+
+        response = client.post(
+            "/v1/auth/logout-all-for-tenant",
+            headers={"Authorization": f"Bearer {signup_body['access_token']}"},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["revoked_count"] == 2
+
+        refresh_after = client.post(
+            "/v1/auth/refresh",
+            json={"refresh_token": second_login["refresh_token"]},
+        )
+        assert refresh_after.status_code == 401
+
+    async def test_missing_bearer_token_returns_401(self, client):
+        response = client.post("/v1/auth/logout-all-for-tenant")
+
+        assert response.status_code == 401
+        assert response.json()["code"] == "invalid_access_token"
+
+    async def test_garbage_bearer_token_returns_401(self, client):
+        response = client.post(
+            "/v1/auth/logout-all-for-tenant",
+            headers={"Authorization": "Bearer not-a-real-token"},
+        )
+
+        assert response.status_code == 401
+        assert response.json()["code"] == "invalid_access_token"
 
 
 class TestFullAccountEntryJourney:
