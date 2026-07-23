@@ -19,10 +19,16 @@ from app.api.schemas.auth import (
     TenantSelectionRequiredResponse,
     UserResponse,
 )
+from app.api.schemas.invitations import InvitationResponse, InviteAcceptanceResponse
+from app.models.invitation import Invitation
 from app.models.membership import TenantMembership
 from app.models.tenant import Tenant
 from app.models.user import User
-from app.services.auth_models import AuthenticatedSession, TenantSelectionRequired
+from app.services.auth_models import (
+    AuthenticatedSession,
+    InviteAcceptanceResult,
+    TenantSelectionRequired,
+)
 
 
 def _to_user_response(user: User) -> UserResponse:
@@ -62,4 +68,23 @@ def to_tenant_selection_required_response(
     return TenantSelectionRequiredResponse(
         user=_to_user_response(result.user),
         preauth_token=result.preauth_token,
+    )
+
+
+def to_invitation_response(invitation: Invitation) -> InvitationResponse:
+    return InvitationResponse(
+        id=invitation.id,
+        email=invitation.email,
+        role=invitation.role,
+        status=invitation.status,
+    )
+
+
+def to_invite_acceptance_response(
+    result: InviteAcceptanceResult,
+) -> InviteAcceptanceResponse:
+    return InviteAcceptanceResponse(
+        invitation=to_invitation_response(result.invitation),
+        tenant=_to_tenant_response(result.tenant),
+        membership=_to_membership_response(result.membership),
     )
