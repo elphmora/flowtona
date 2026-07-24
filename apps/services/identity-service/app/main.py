@@ -6,19 +6,26 @@ app from its constituent pieces (middleware, exception handlers,
 routes, service wiring) — extracted as a function, not left as
 module-level statements, specifically so tests build the SAME real
 application every request actually runs through, rather than a hand-
-assembled duplicate that risks silently diverging as this file grows
-(CORS, compression, tracing, metrics, more middleware — all of which
-a test-only reassembly would need to remember to duplicate and keep
-in sync).
+assembled duplicate that risks silently diverging as this file grows.
 
-Account-entry routes (signup, login, select-tenant) are registered via
-app/api/v1/router.py. Remaining routes (sessions, verification,
-invitations) are added incrementally in their own PRs, alongside
-AuthService's own build order.
+app/api/v1/router.py registers the versioned business API (auth,
+invitations, and whatever follows). System endpoints (health probes,
+metadata, metrics) are registered directly here, unversioned — they're
+infrastructure concerns consumed by k8s/Prometheus, not part of the
+API surface a client would care about versioning.
 
-Middleware and exception handlers are registered in this specific
-order: request ID middleware FIRST, so request.state.request_id
-already exists by the time any exception handler runs and needs it.
+Middleware registration order: Starlette wraps middleware in REVERSE
+of registration order (the last one added ends up outermost, running
+first on the way in) — so request ID and metrics middleware here do
+NOT run in the order they're registered in. This doesn't matter
+between these two specifically: MetricsMiddleware never reads
+request.state.request_id, so there's no dependency between them either
+way. The property that DOES matter — request.state.request_id existing
+before the RFC 9457 exception handlers read it — holds regardless of
+this ordering, since FastAPI's exception-handling machinery
+(ExceptionMiddleware) is always innermost relative to every user
+middleware, no matter what order they were added in. Verified by
+tests/unit/api/test_middleware_ordering.py, not just asserted here.
 """
 
 from collections.abc import AsyncIterator
@@ -28,9 +35,13 @@ from fastapi import FastAPI
 
 from app.api.dependencies import ServiceRegistry, build_services
 from app.api.errors import register_exception_handlers
+from app.api.system_health import router as system_health_router
+from app.api.system_meta import router as system_meta_router
+from app.api.system_metrics import router as system_metrics_router
 from app.api.v1.router import router as v1_router
 from app.core.config import Settings
 from app.core.config import settings as default_settings
+from app.middleware.metrics import add_metrics_middleware
 from app.middleware.request_id import add_request_id_middleware
 
 
@@ -61,10 +72,9 @@ def create_app(
         one passed in) and attaches the pieces route dependencies
         actually need to app.state — auth_service for
         get_auth_service(), token_service for get_token_service() (used
-        by the Bearer-token auth dependency). Also attaches settings
-        itself — future health/diagnostics/version endpoints will want
-        configuration information without each needing its own import.
-        No teardown needed yet — the in-memory store is simply garbage
+        by the Bearer-token auth dependency and the health/metadata
+        endpoints). Also attaches settings itself, used by /info. No
+        teardown needed yet — the in-memory store is simply garbage
         collected when the process exits; this will need real cleanup
         once Phase 2 introduces persistent connections."""
         resolved_registry = (
@@ -82,8 +92,12 @@ def create_app(
     )
 
     add_request_id_middleware(app)
+    add_metrics_middleware(app)
     register_exception_handlers(app)
     app.include_router(v1_router)
+    app.include_router(system_health_router)
+    app.include_router(system_meta_router)
+    app.include_router(system_metrics_router)
 
     return app
 
