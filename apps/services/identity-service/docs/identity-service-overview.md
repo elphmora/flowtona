@@ -1,4 +1,3 @@
-
 # identity-service — Architecture Overview
 
 Authentication and authorization service for the Flowtona platform.
@@ -8,8 +7,8 @@ belong to more than one business.
 
 ## What it does
 
-- **Accounts** — self-serve signup, email verification, password
-  management.
+- **Accounts** — self-serve signup, email verification, password-based
+  authentication.
 - **Tenants & memberships** — each signup creates a business
   ("tenant"); a user's role within a tenant determines what they can
   do there. A user can belong to multiple tenants (e.g. a technician
@@ -46,6 +45,48 @@ flowchart LR
 - **Data Store** — persisted accounts, tenants, memberships,
   invitations, and session state.
 - **Email Delivery** — verification links and invitation emails.
+
+## Architecture
+
+Internally, the service is organised as a strict layered pipeline —
+each layer only knows about the one directly beneath it:
+
+```
+HTTP API
+    │
+    ▼
+AuthService (orchestration)
+    │
+    ▼
+Entity Services
+    │
+    ▼
+Repository Protocols
+    │
+    ▼
+Persistence (currently in-memory)
+```
+
+- **HTTP API** — thin route handlers. They translate a request into a
+  call on `AuthService`, map the result to a response, and otherwise
+  contain no business logic — errors are translated into a consistent
+  response shape by a single, centralized handler, not per-route code.
+- **AuthService** — the only layer that composes more than one entity
+  service together into a complete workflow (signup, login, accepting
+  an invitation, and so on). It owns almost no business rules of its
+  own.
+- **Entity services** — one per aggregate (users, tenants,
+  memberships, invitations, email verification, refresh tokens,
+  permissions, tokens). Each owns the business rules for its own
+  aggregate and nothing else.
+- **Repository Protocols** — persistence is accessed only through
+  structurally-typed interfaces, never a concrete implementation
+  directly. Entity services and `AuthService` are written against
+  these Protocols, not against any specific storage technology.
+- **Persistence** — currently in-memory (Phase 1). Repository
+  implementations are interchangeable behind their Protocol
+  interfaces, so PostgreSQL can eventually replace the in-memory
+  layer without changing anything above it.
 
 ## Design principles
 
