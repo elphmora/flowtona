@@ -1,4 +1,3 @@
-
 # identity-service — Operator Guide
 
 ## Overview
@@ -217,6 +216,64 @@ curl -s -i -X POST http://localhost:8000/v1/auth/logout-all-for-tenant
 
 This example also demonstrates RFC 9457 Problem Details responses and
 request correlation via the `X-Request-ID` response header.
+
+### Deployment smoke test
+
+`scripts/smoke_test.sh` runs the standard Flowtona deployment
+verification sequence against a running identity-service instance —
+the operational surface, the full authentication flow (signup, logout,
+login, refresh, logout), and the RFC 9457 error shape — with a
+pass/fail summary and an exit code suitable for CI.
+
+Run against a locally running service:
+
+```bash
+./scripts/smoke_test.sh
+```
+
+Expected output on success:
+
+```
+=== Smoke testing identity-service at http://localhost:8000 ===
+--- Operational surface ---
+  PASS: GET /healthz (200, 0.006034s)
+  PASS: GET /readyz (200, 0.006686s)
+  PASS: GET /startupz (200, 0.007508s)
+  PASS: GET /info (200, 0.005331s)
+  PASS: GET /.well-known/jwks.json (200, 0.005693s)
+  PASS: JWKS response contains at least one key
+  PASS: GET /metrics (200, 0.010131s)
+  PASS: Metrics output contains http_requests_total
+--- Business flow (signup -> logout -> login -> refresh -> logout) ---
+  PASS: POST /v1/auth/signup (201, 0.115297s)
+  PASS: Signup response contains access_token and refresh_token
+  PASS: POST /v1/auth/logout (signup session) (204, 0.004178s)
+  PASS: POST /v1/auth/login (200, 0.115690s)
+  PASS: POST /v1/auth/refresh (200, 0.004914s)
+  PASS: POST /v1/auth/logout (rotated session) (204, 0.003262s)
+--- Error handling (RFC 9457 + request correlation) ---
+  PASS: Protected route without auth returns 401
+  PASS: Error response uses application/problem+json
+  PASS: Error response includes X-Request-ID header
+  PASS: Error body contains the RFC 9457 core fields
+=== Summary: 18 passed, 0 failed ===
+```
+
+Run against another deployment:
+
+```bash
+BASE_URL=https://identity.example.com ./scripts/smoke_test.sh
+```
+
+Requires `curl` and `jq`. Exit codes: `0` — every check passed.
+Non-zero — one or more checks failed (see stderr output for which
+ones, and why).
+
+```bash
+./scripts/smoke_test.sh
+SMOKE_EXIT=$?
+echo "Smoke-test exit code: $SMOKE_EXIT"
+```
 
 ## Troubleshooting
 
