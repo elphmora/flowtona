@@ -26,8 +26,8 @@ are in-memory; PostgreSQL is deliberately deferred to a later phase.
 
 ```bash
 cd apps/services/identity-service
-python3 -m venv venv
-source venv/bin/activate
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements-dev.txt
 python scripts/generate_signing_keypair.py
 uvicorn app.main:app --reload

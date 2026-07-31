@@ -23,8 +23,8 @@ metrics). Repositories are in-memory, not backed by PostgreSQL yet
 
 ```bash
 cd apps/services/identity-service
-python3 -m venv venv
-source venv/bin/activate
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements-dev.txt
 ```
 
@@ -63,7 +63,7 @@ deployment platform rather than a local `.env` file.
 ## Running the test suite
 
 ```bash
-source venv/bin/activate
+source .venv/bin/activate
 
 # Full suite
 pytest tests -q
@@ -133,7 +133,7 @@ tests/
 ## Running locally
 
 ```bash
-source venv/bin/activate
+source .venv/bin/activate
 python scripts/generate_signing_keypair.py   # first time only
 uvicorn app.main:app --reload
 ```
