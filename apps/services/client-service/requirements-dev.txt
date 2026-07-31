@@ -1,0 +1,10 @@
+# Development/testing dependencies
+# Install runtime dependencies first
+-r requirements.txt
+# Testing
+pytest>=8.3
+pytest-asyncio>=0.24   # Repository Protocol methods are async (Platform Conventions §4)
+httpx>=0.27            # FastAPI TestClient / integration tests (Platform Conventions §8)
+# Code quality
+ruff>=0.7
+mypy>=1.13             # Enforces Protocol conformance via static typing (Platform Conventions §4)

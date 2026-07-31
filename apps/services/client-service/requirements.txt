@@ -1,0 +1,18 @@
+# Runtime dependencies — client-service
+
+fastapi>=0.115
+uvicorn[standard]>=0.32
+
+# Pydantic v2 + email validation (EmailStr, used in app/models/contact.py)
+pydantic>=2.9
+email-validator>=2.2
+
+# Config/settings loading (app/core/config.py)
+pydantic-settings>=2.5
+
+# JWT verification via JWKS (Platform Conventions §7)
+# [crypto] extra needed for ES256 verification, not just HS256
+pyjwt[crypto]>=2.9
+
+# Prometheus metrics (app/middleware/metrics.py)
+prometheus-client>=0.20
