@@ -8,12 +8,21 @@ resend_verification_email(), create_invite(),
 accept_invite_existing_user(), accept_invite_new_user(), plus
 constructor/DI wiring. Built incrementally across five PRs matching
 AuthService's own build order.
+
+permissions-claim tests added when client-service's design review
+surfaced that the access token never carried a permissions claim at
+all (Amendment 2 was written but never implemented) — these tests
+prove the claim exists, reflects PermissionService's actual policy
+(not just role), and updates correctly across the soft-gate lifecycle,
+placed inside whichever existing class already covers the relevant
+AuthService method rather than a new organizing principle.
 """
 
 from uuid import uuid4
 
 import pytest
 
+from app.constants.permissions import Permission
 from app.constants.roles import Role
 from app.exceptions.auth import (
     InvalidCredentialsError,
@@ -138,6 +147,45 @@ class TestSignup:
         assert claims.tenant_id == session.tenant.id
         assert claims.role == Role.OWNER
 
+    async def test_access_token_excludes_soft_gated_permissions_before_verification(
+        self, auth_service, all_services
+    ):
+        """The concrete, testable consequence of PermissionService's
+        soft gate actually reaching the issued token: a fresh owner's
+        email is NOT verified, so BILLING_MANAGE and MEMBERS_INVITE
+        must be absent from the access token, even though OWNER's base
+        role mapping includes both."""
+        session = await auth_service.signup(
+            email="dana@example.com",
+            password="hunter2",
+            display_name="Dana",
+            tenant_label="Dana's Plumbing",
+        )
+        claims = await all_services["token_service"].verify_access_token(
+            token=session.access_token
+        )
+        assert Permission.BILLING_MANAGE not in claims.permissions
+        assert Permission.MEMBERS_INVITE not in claims.permissions
+
+    async def test_access_token_includes_client_permissions_before_verification(
+        self, auth_service, all_services
+    ):
+        """CLIENTS_READ/CLIENTS_WRITE (client-service Decision 3) are
+        deliberately NOT in SOFT_GATED_PERMISSIONS — a fresh, unverified
+        owner must still have them, the same way SCHEDULE_READ already
+        does."""
+        session = await auth_service.signup(
+            email="dana@example.com",
+            password="hunter2",
+            display_name="Dana",
+            tenant_label="Dana's Plumbing",
+        )
+        claims = await all_services["token_service"].verify_access_token(
+            token=session.access_token
+        )
+        assert Permission.CLIENTS_READ in claims.permissions
+        assert Permission.CLIENTS_WRITE in claims.permissions
+
     async def test_sends_verification_email(self, auth_service, email_sender):
         session = await auth_service.signup(
             email="dana@example.com",
@@ -198,6 +246,33 @@ class TestLogin:
 
         assert isinstance(result, AuthenticatedSession)
         assert result.user.email == "dana@example.com"
+
+    async def test_technician_token_has_read_only_client_permission(
+        self, auth_service, all_services
+    ):
+        """client-service Decision 3: TECHNICIAN gets CLIENTS_READ but
+        never CLIENTS_WRITE, unlike OWNER/DISPATCHER."""
+        owner_session = await auth_service.signup(
+            email="owner@example.com",
+            password="hunter2",
+            display_name="Owner",
+            tenant_label="Owner's Business",
+        )
+        _invitation, raw_invite_token = await all_services["invitation_service"].create(
+            tenant_id=owner_session.tenant.id,
+            email="tech@example.com",
+            role=Role.TECHNICIAN,
+            invited_by_user_id=owner_session.user.id,
+        )
+        session = await auth_service.accept_invite_new_user(
+            raw_token=raw_invite_token, password="hunter2", display_name="Tech"
+        )
+
+        claims = await all_services["token_service"].verify_access_token(
+            token=session.access_token
+        )
+        assert Permission.CLIENTS_READ in claims.permissions
+        assert Permission.CLIENTS_WRITE not in claims.permissions
 
     async def test_wrong_password_raises_invalid_credentials(self, auth_service):
         await auth_service.signup(
@@ -329,6 +404,39 @@ class TestSelectTenant:
         assert isinstance(result, AuthenticatedSession)
         assert result.tenant.id == other_tenant.id
         assert result.membership.role == Role.TECHNICIAN
+
+    async def test_access_token_reflects_the_selected_tenants_membership(
+        self, auth_service, all_services
+    ):
+        """The permissions claim must reflect the CHOSEN membership's
+        role (TECHNICIAN, read-only client access), not the original
+        tenant's OWNER role — select_tenant() switches the effective
+        authorization context entirely, not just the tenant_id claim."""
+        session = await auth_service.signup(
+            email="dana@example.com",
+            password="hunter2",
+            display_name="Dana",
+            tenant_label="Dana's Plumbing",
+        )
+        other_tenant = await all_services["tenant_service"].create(
+            tenant_label="Second Business"
+        )
+        await all_services["membership_service"].create(
+            user_id=session.user.id, tenant_id=other_tenant.id, role=Role.TECHNICIAN
+        )
+        login_result = await auth_service.login(
+            email="dana@example.com", password="hunter2"
+        )
+
+        result = await auth_service.select_tenant(
+            preauth_token=login_result.preauth_token, tenant_id=other_tenant.id
+        )
+
+        claims = await all_services["token_service"].verify_access_token(
+            token=result.access_token
+        )
+        assert Permission.CLIENTS_WRITE not in claims.permissions
+        assert Permission.CLIENTS_READ in claims.permissions
 
     async def test_does_not_send_another_verification_email(
         self, auth_service, all_services, email_sender
@@ -466,6 +574,38 @@ class TestRefresh:
             token=refreshed.access_token
         )
         assert claims.permissions_version == 1
+
+    async def test_reflects_newly_unlocked_permissions_after_email_verification(
+        self, auth_service, all_services, email_sender
+    ):
+        """The concrete, end-to-end proof of Invariant 15's promise:
+        newly-unlocked permissions apply from the NEXT refresh(), not
+        immediately. Before verify_email(): no BILLING_MANAGE/
+        MEMBERS_INVITE. After verify_email() + refresh(): both present,
+        via the REAL workflow this time (verify_email()), not the
+        bump_permissions_version_for_user() shortcut used above."""
+        session = await auth_service.signup(
+            email="dana@example.com",
+            password="hunter2",
+            display_name="Dana",
+            tenant_label="Dana's Plumbing",
+        )
+        original_claims = await all_services["token_service"].verify_access_token(
+            token=session.access_token
+        )
+        assert Permission.MEMBERS_INVITE not in original_claims.permissions
+
+        raw_token = email_sender.last_verification_token_by_email["dana@example.com"]
+        await auth_service.verify_email(raw_token=raw_token)
+
+        refreshed = await auth_service.refresh(
+            raw_refresh_token=session.raw_refresh_token
+        )
+        refreshed_claims = await all_services["token_service"].verify_access_token(
+            token=refreshed.access_token
+        )
+        assert Permission.BILLING_MANAGE in refreshed_claims.permissions
+        assert Permission.MEMBERS_INVITE in refreshed_claims.permissions
 
     async def test_invalid_token_propagates(self, auth_service):
         with pytest.raises(InvalidRefreshTokenError):
@@ -671,6 +811,10 @@ class TestVerifyEmail:
             token=session.access_token
         )
         assert claims.permissions_version == 0
+        # The permissions CLAIM, not just the version counter, must
+        # also stay frozen at its original issuance-time value —
+        # Invariant 15 covers the whole token, not just one field of it.
+        assert Permission.MEMBERS_INVITE not in claims.permissions
 
     async def test_invalid_token_propagates(self, auth_service):
         with pytest.raises(VerificationTokenInvalidError):
@@ -987,7 +1131,7 @@ class TestAcceptInviteNewUser:
             display_name="Owner",
             tenant_label="Owner's Business",
         )
-        invitation, raw_invite_token = await all_services["invitation_service"].create(
+        _invitation, raw_invite_token = await all_services["invitation_service"].create(
             tenant_id=owner_session.tenant.id,
             email="new.invitee@example.com",
             role=Role.TECHNICIAN,
@@ -1004,6 +1148,40 @@ class TestAcceptInviteNewUser:
         assert session.membership.role == Role.TECHNICIAN
         assert session.access_token
         assert session.raw_refresh_token
+
+    async def test_access_token_includes_soft_gated_permissions_immediately(
+        self, auth_service, all_services
+    ):
+        """Deliberate asymmetry with signup()'s owner path: an invited
+        DISPATCHER's email_verified=True is set at USER CREATION
+        (Invariant 9 — accepting a mailed invite link is itself proof
+        of mailbox ownership), so the soft gate never applies to this
+        path at all — MEMBERS_INVITE must be present in the very first
+        access token issued, with no verify_email()/refresh() cycle
+        needed the way signup()'s owner path requires."""
+        owner_session = await auth_service.signup(
+            email="owner@example.com",
+            password="hunter2",
+            display_name="Owner",
+            tenant_label="Owner's Business",
+        )
+        _invitation, raw_invite_token = await all_services["invitation_service"].create(
+            tenant_id=owner_session.tenant.id,
+            email="new.dispatcher@example.com",
+            role=Role.DISPATCHER,
+            invited_by_user_id=owner_session.user.id,
+        )
+
+        session = await auth_service.accept_invite_new_user(
+            raw_token=raw_invite_token, password="hunter2", display_name="Dispatcher"
+        )
+
+        claims = await all_services["token_service"].verify_access_token(
+            token=session.access_token
+        )
+        assert Permission.MEMBERS_INVITE in claims.permissions
+        assert Permission.CLIENTS_READ in claims.permissions
+        assert Permission.CLIENTS_WRITE in claims.permissions
 
     async def test_invalid_token_propagates(self, auth_service):
         with pytest.raises(InvitationInvalidError):
@@ -1026,7 +1204,7 @@ class TestAcceptInviteNewUser:
             display_name="Existing",
             tenant_label="Somewhere Else",
         )
-        invitation, raw_invite_token = await all_services["invitation_service"].create(
+        _invitation, raw_invite_token = await all_services["invitation_service"].create(
             tenant_id=owner_session.tenant.id,
             email="already.exists@example.com",
             role=Role.TECHNICIAN,
@@ -1064,3 +1242,84 @@ class TestConstruction:
         assert auth_service._token_service is all_services["token_service"]
         assert auth_service._permission_service is all_services["permission_service"]
         assert auth_service._email_sender is email_sender
+
+
+class _SpyPermissionService:
+    """Wraps a real PermissionService, recording every call and its
+    return value — same instrumentation pattern as
+    test_token_service.py's _CountingSecretProvider (a real object,
+    not a mock). Exists specifically to protect the architectural
+    boundary this whole change is built around: AuthService must
+    resolve permissions via PermissionService.effective_permissions()
+    every single time, never by reaching for permissions_for_role() or
+    ROLE_PERMISSIONS directly. Delegates every call to a real
+    PermissionService — this wraps and observes, it doesn't replace
+    the actual policy logic."""
+
+    def __init__(self) -> None:
+        self._inner = PermissionService()
+        self.calls: list[frozenset[Permission]] = []
+
+    def effective_permissions(self, *, user, membership) -> frozenset[Permission]:
+        result = self._inner.effective_permissions(user=user, membership=membership)
+        self.calls.append(result)
+        return result
+
+    def has_permission(self, *, user, membership, permission) -> bool:
+        return self._inner.has_permission(
+            user=user, membership=membership, permission=permission
+        )
+
+
+class TestPermissionResolutionBoundary:
+    """Protects the architectural contract itself, not just an
+    outcome: AuthService must call PermissionService.
+    effective_permissions() exactly once per access-token issuance,
+    and TokenService must receive exactly that returned value — not a
+    frozenset reconstructed some other way (e.g. permissions_for_role()
+    called directly inside AuthService, bypassing PermissionService's
+    actual policy evaluation)."""
+
+    pytestmark = pytest.mark.asyncio
+
+    async def test_signup_calls_effective_permissions_exactly_once(
+        self, all_services, email_sender
+    ):
+        spy = _SpyPermissionService()
+        services = {**all_services, "permission_service": spy}
+        service = AuthService(email_sender=email_sender, **services)
+
+        session = await service.signup(
+            email="dana@example.com",
+            password="hunter2",
+            display_name="Dana",
+            tenant_label="Dana's Plumbing",
+        )
+
+        assert len(spy.calls) == 1
+        claims = await services["token_service"].verify_access_token(
+            token=session.access_token
+        )
+        assert claims.permissions == spy.calls[0]
+
+    async def test_refresh_calls_effective_permissions_exactly_once(
+        self, all_services, email_sender
+    ):
+        spy = _SpyPermissionService()
+        services = {**all_services, "permission_service": spy}
+        service = AuthService(email_sender=email_sender, **services)
+        session = await service.signup(
+            email="dana@example.com",
+            password="hunter2",
+            display_name="Dana",
+            tenant_label="Dana's Plumbing",
+        )
+        calls_after_signup = len(spy.calls)
+
+        refreshed = await service.refresh(raw_refresh_token=session.raw_refresh_token)
+
+        assert len(spy.calls) == calls_after_signup + 1
+        claims = await services["token_service"].verify_access_token(
+            token=refreshed.access_token
+        )
+        assert claims.permissions == spy.calls[-1]

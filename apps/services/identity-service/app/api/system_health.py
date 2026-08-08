@@ -65,7 +65,7 @@ async def _check_ready(
     that doesn't say which probe was actually hit."""
     try:
         await token_service.build_jwks()
-    except Exception:
+    except Exception:  # noqa: BLE001
         return JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             content={"status": not_ready_status},

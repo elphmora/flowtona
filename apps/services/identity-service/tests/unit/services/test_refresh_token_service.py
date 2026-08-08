@@ -79,7 +79,7 @@ class TestRotate:
         the family-wide revocation must catch the legitimate winner's
         successor too — not just reject the loser."""
         user_id, tenant_id = uuid4(), uuid4()
-        original, raw_token = await service.issue(user_id=user_id, tenant_id=tenant_id)
+        _original, raw_token = await service.issue(user_id=user_id, tenant_id=tenant_id)
 
         # Simulate a concurrent request winning the rotation first.
         now = datetime.now(timezone.utc)

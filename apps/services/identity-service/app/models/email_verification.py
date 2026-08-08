@@ -56,11 +56,12 @@ class EmailVerification(DomainModel):
         if self.expires_at <= self.created_at:
             raise ValueError("expires_at must be later than created_at")
 
-        if self.status == EmailVerificationStatus.PENDING:
-            if self.consumed_at is not None or self.revoked_at is not None:
-                raise ValueError(
-                    "pending verification cannot have consumed_at or revoked_at"
-                )
+        if self.status == EmailVerificationStatus.PENDING and (
+            self.consumed_at is not None or self.revoked_at is not None
+        ):
+            raise ValueError(
+                "pending verification cannot have consumed_at or revoked_at"
+            )
 
         if self.status == EmailVerificationStatus.CONSUMED:
             if self.consumed_at is None:

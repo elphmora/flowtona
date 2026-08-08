@@ -91,14 +91,14 @@ class TestTenantMembership:
 
 class TestRefreshTokenRecord:
     def _base_kwargs(self, **overrides):
-        kwargs = dict(
-            user_id=uuid4(),
-            tenant_id=uuid4(),
-            family_id=uuid4(),
-            token_hash="hash",
-            issued_at=NOW,
-            expires_at=NOW + timedelta(minutes=10),
-        )
+        kwargs = {
+            "user_id": uuid4(),
+            "tenant_id": uuid4(),
+            "family_id": uuid4(),
+            "token_hash": "hash",
+            "issued_at": NOW,
+            "expires_at": NOW + timedelta(minutes=10),
+        }
         kwargs.update(overrides)
         return kwargs
 
@@ -172,15 +172,15 @@ class TestRefreshTokenRecord:
 
 class TestInvitation:
     def _base_kwargs(self, **overrides):
-        kwargs = dict(
-            tenant_id=uuid4(),
-            email="new.tech@example.com",
-            role=Role.TECHNICIAN,
-            token_hash="hash",
-            invited_by_user_id=uuid4(),
-            created_at=NOW,
-            expires_at=NOW + timedelta(days=7),
-        )
+        kwargs = {
+            "tenant_id": uuid4(),
+            "email": "new.tech@example.com",
+            "role": Role.TECHNICIAN,
+            "token_hash": "hash",
+            "invited_by_user_id": uuid4(),
+            "created_at": NOW,
+            "expires_at": NOW + timedelta(days=7),
+        }
         kwargs.update(overrides)
         return kwargs
 
@@ -207,13 +207,13 @@ class TestInvitation:
 
 class TestEmailVerification:
     def _base_kwargs(self, **overrides):
-        kwargs = dict(
-            user_id=uuid4(),
-            email="dana@example.com",
-            token_hash="hash",
-            created_at=NOW,
-            expires_at=NOW + timedelta(hours=24),
-        )
+        kwargs = {
+            "user_id": uuid4(),
+            "email": "dana@example.com",
+            "token_hash": "hash",
+            "created_at": NOW,
+            "expires_at": NOW + timedelta(hours=24),
+        }
         kwargs.update(overrides)
         return kwargs
 

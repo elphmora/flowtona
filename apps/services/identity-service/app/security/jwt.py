@@ -112,9 +112,9 @@ def build_jwk(public_key: EllipticCurvePublicKey, *, key_id: str) -> dict[str, o
     as a standalone primitive independent of whatever caller-side
     validation TokenService happens to do before calling this."""
     if not isinstance(public_key, EllipticCurvePublicKey):
-        raise ValueError("build_jwk() requires an EC public key")
+        raise ValueError("build_jwk() requires an EC public key")  # noqa: TRY004
     if not isinstance(public_key.curve, ec.SECP256R1):
-        raise ValueError("build_jwk() requires a P-256 public key")
+        raise ValueError("build_jwk() requires a P-256 public key")  # noqa: TRY004
 
     numbers = public_key.public_numbers()
     # P-256 coordinates are always 32 bytes — pad explicitly rather

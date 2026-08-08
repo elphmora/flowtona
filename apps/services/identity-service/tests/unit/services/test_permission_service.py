@@ -48,7 +48,13 @@ def test_verified_owner_gets_full_role_permissions(service):
     perms = service.effective_permissions(user=user, membership=membership)
 
     assert perms == frozenset(
-        {Permission.BILLING_MANAGE, Permission.SCHEDULE_READ, Permission.MEMBERS_INVITE}
+        {
+            Permission.BILLING_MANAGE,
+            Permission.SCHEDULE_READ,
+            Permission.MEMBERS_INVITE,
+            Permission.CLIENTS_READ,
+            Permission.CLIENTS_WRITE,
+        }
     )
 
 
@@ -58,7 +64,9 @@ def test_unverified_owner_loses_soft_gated_permissions_but_keeps_schedule_read(s
 
     perms = service.effective_permissions(user=user, membership=membership)
 
-    assert perms == frozenset({Permission.SCHEDULE_READ})
+    assert perms == frozenset(
+        {Permission.SCHEDULE_READ, Permission.CLIENTS_READ, Permission.CLIENTS_WRITE}
+    )
     assert Permission.BILLING_MANAGE not in perms
     assert Permission.MEMBERS_INVITE not in perms
 
