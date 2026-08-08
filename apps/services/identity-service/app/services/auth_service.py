@@ -12,6 +12,18 @@ codebase: repositories own persistence and atomic state transitions,
 entity services own aggregate-specific business rules, AuthService
 owns workflows spanning more than one of them.
 
+_issue_session() and refresh() both now resolve
+PermissionService.effective_permissions() immediately before calling
+TokenService.issue_access_token() — added when client-service's
+design review surfaced that TokenService's own claims only carried
+`role`, never a resolved `permissions` list, and that role alone
+cannot reproduce identity-service's actual authorization policy.
+TokenService deliberately does not compute this itself — see that
+service's own module docstring. EVERY access-token issuance path in
+this class must resolve permissions this same way; missing even one
+would issue a token whose contract disagrees with every other token
+this service produces.
+
 All ten public methods are now implemented: signup(), login(),
 select_tenant(), refresh(), logout(), logout_all_for_tenant(),
 verify_email(), resend_verification_email(), create_invite(),
@@ -107,7 +119,17 @@ class AuthService:
         token. Used by signup(), login()'s single-active-membership
         path, and select_tenant() — the access token always reflects
         the given membership's CURRENT role/permissions_version, not
-        any cached value."""
+        any cached value.
+
+        permissions is resolved via PermissionService.
+        effective_permissions() HERE, immediately before issuance, so
+        every access-token issuance path in this class computes it the
+        same way from the same User/TenantMembership pair — no risk of
+        one path using a stale or differently-derived value than
+        another."""
+        permissions = self._permission_service.effective_permissions(
+            user=user, membership=membership
+        )
         _, raw_refresh_token = await self._refresh_token_service.issue(
             user_id=user.id, tenant_id=tenant.id
         )
@@ -115,6 +137,7 @@ class AuthService:
             user_id=user.id,
             tenant_id=tenant.id,
             role=membership.role,
+            permissions=permissions,
             permissions_version=membership.permissions_version,
         )
         return AuthenticatedSession(
@@ -154,7 +177,7 @@ class AuthService:
             await self._email_sender.send_verification_email(
                 to=user.email, raw_token=raw_verification_token
             )
-        except Exception:
+        except Exception:  # noqa: S110, BLE001
             # Deliberately broad — isolating an inherently unreliable
             # external dependency (email delivery) is exactly the
             # legitimate case for catching Exception broadly. Any
@@ -256,7 +279,9 @@ class AuthService:
         Then a FRESH MembershipService lookup — role/permissions_version
         live on TenantMembership, not RefreshTokenRecord, so refresh
         must reflect current permissions, not whatever was true at
-        original login.
+        original login. permissions is resolved fresh here via
+        PermissionService, the same as _issue_session() — never copied
+        from the token being refreshed.
 
         If the membership is inactive after rotation, the refresh-token
         family is revoked before the operation fails — no valid session
@@ -296,10 +321,14 @@ class AuthService:
                 f"Refresh token references missing tenant {record.tenant_id}"
             )
 
+        permissions = self._permission_service.effective_permissions(
+            user=user, membership=membership
+        )
         access_token = await self._token_service.issue_access_token(
             user_id=user.id,
             tenant_id=tenant.id,
             role=membership.role,
+            permissions=permissions,
             permissions_version=membership.permissions_version,
         )
         return AuthenticatedSession(
@@ -339,7 +368,8 @@ class AuthService:
         Does NOT touch RefreshTokenService or issue new tokens —
         Invariant 15: verifying an email must not invalidate any
         existing session; newly-unlocked permissions apply from the
-        caller's next refresh() onward, not immediately."""
+        caller's next refresh() onward, not immediately (see refresh()'s
+        own docstring)."""
         verification = await self._email_verification_service.verify(
             raw_token=raw_token
         )

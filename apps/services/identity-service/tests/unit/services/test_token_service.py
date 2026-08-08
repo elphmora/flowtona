@@ -7,6 +7,7 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
 
+from app.constants.permissions import Permission
 from app.constants.roles import Role
 from app.exceptions.token import (
     ExpiredAccessTokenError,
@@ -68,6 +69,7 @@ class TestAccessToken:
             user_id=user_id,
             tenant_id=tenant_id,
             role=Role.OWNER,
+            permissions=frozenset({Permission.SCHEDULE_READ}),
             permissions_version=3,
         )
 
@@ -76,16 +78,87 @@ class TestAccessToken:
         assert claims.user_id == user_id
         assert claims.tenant_id == tenant_id
         assert claims.role == Role.OWNER
+        assert claims.permissions == frozenset({Permission.SCHEDULE_READ})
         assert claims.permissions_version == 3
         assert claims.jti is not None
+
+    async def test_empty_permissions_round_trips_correctly(self, service):
+        """A membership with zero effective permissions (e.g. inactive
+        — PermissionService.effective_permissions() returns an empty
+        frozenset in that case) must still issue and verify cleanly,
+        not be treated as a missing/malformed claim."""
+        token = await service.issue_access_token(
+            user_id=uuid4(),
+            tenant_id=uuid4(),
+            role=Role.TECHNICIAN,
+            permissions=frozenset(),
+            permissions_version=0,
+        )
+
+        claims = await service.verify_access_token(token=token)
+
+        assert claims.permissions == frozenset()
+
+    async def test_full_permission_set_round_trips_correctly(self, service):
+        all_permissions = frozenset(Permission)
+        token = await service.issue_access_token(
+            user_id=uuid4(),
+            tenant_id=uuid4(),
+            role=Role.OWNER,
+            permissions=all_permissions,
+            permissions_version=0,
+        )
+
+        claims = await service.verify_access_token(token=token)
+
+        assert claims.permissions == all_permissions
+
+    async def test_unknown_permission_value_raises_invalid(
+        self, service, secret_provider
+    ):
+        """A token whose permissions claim contains a string that
+        isn't a real Permission value must be rejected — the same
+        treatment as any other malformed application claim, not
+        silently ignored or passed through as an unrecognized string."""
+        pem = await secret_provider.get_secret(name="jwt_signing_private_key")
+        private_key = serialization.load_pem_private_key(pem, password=None)
+        now = datetime.now(timezone.utc)
+        tampered_token = encode_jwt(
+            {
+                "sub": str(uuid4()),
+                "tenant_id": str(uuid4()),
+                "role": Role.OWNER.value,
+                "permissions": ["clients:delete_everything"],
+                "permissions_version": 0,
+                "token_type": "access",
+                "jti": str(uuid4()),
+                "iss": "https://identity.flowtona.dev",
+                "aud": "flowtona-api",
+                "iat": now,
+                "exp": now + timedelta(minutes=15),
+            },
+            private_key=private_key,
+            key_id="flowtona-local-001",
+        )
+
+        with pytest.raises(InvalidAccessTokenError):
+            await service.verify_access_token(token=tampered_token)
 
     async def test_two_tokens_get_different_jti(self, service):
         user_id, tenant_id = uuid4(), uuid4()
         token1 = await service.issue_access_token(
-            user_id=user_id, tenant_id=tenant_id, role=Role.OWNER, permissions_version=0
+            user_id=user_id,
+            tenant_id=tenant_id,
+            role=Role.OWNER,
+            permissions=frozenset(),
+            permissions_version=0,
         )
         token2 = await service.issue_access_token(
-            user_id=user_id, tenant_id=tenant_id, role=Role.OWNER, permissions_version=0
+            user_id=user_id,
+            tenant_id=tenant_id,
+            role=Role.OWNER,
+            permissions=frozenset(),
+            permissions_version=0,
         )
 
         claims1 = await service.verify_access_token(token=token1)
@@ -95,7 +168,11 @@ class TestAccessToken:
 
     async def test_malformed_token_raises_invalid(self, service):
         token = await service.issue_access_token(
-            user_id=uuid4(), tenant_id=uuid4(), role=Role.OWNER, permissions_version=0
+            user_id=uuid4(),
+            tenant_id=uuid4(),
+            role=Role.OWNER,
+            permissions=frozenset(),
+            permissions_version=0,
         )
         tampered = token[:-4] + "AAAA"
 
@@ -114,6 +191,7 @@ class TestAccessToken:
                 token_type="access",
                 tenant_id=str(uuid4()),
                 role=Role.OWNER.value,
+                permissions=[],
                 permissions_version=0,
             ),
             private_key=private_key,
@@ -144,6 +222,7 @@ class TestAccessToken:
                 user_id=uuid4(),
                 tenant_id=uuid4(),
                 role=Role.OWNER,
+                permissions=frozenset(),
                 permissions_version=0,
             )
 
@@ -170,6 +249,7 @@ class TestAccessToken:
                 user_id=uuid4(),
                 tenant_id=uuid4(),
                 role=Role.OWNER,
+                permissions=frozenset(),
                 permissions_version=0,
             )
 
@@ -196,7 +276,11 @@ class TestAccessToken:
         service = TokenService(FileSecretProvider(secrets_dir=tmp_path))
 
         await service.issue_access_token(
-            user_id=uuid4(), tenant_id=uuid4(), role=Role.OWNER, permissions_version=0
+            user_id=uuid4(),
+            tenant_id=uuid4(),
+            role=Role.OWNER,
+            permissions=frozenset(),
+            permissions_version=0,
         )
         with pytest.raises(ValueError):
             await service.build_jwks()
@@ -214,7 +298,11 @@ class TestPreauthToken:
 
     async def test_access_token_rejected_as_preauth_token(self, service):
         access_token = await service.issue_access_token(
-            user_id=uuid4(), tenant_id=uuid4(), role=Role.OWNER, permissions_version=0
+            user_id=uuid4(),
+            tenant_id=uuid4(),
+            role=Role.OWNER,
+            permissions=frozenset(),
+            permissions_version=0,
         )
 
         with pytest.raises(InvalidPreauthTokenError):
@@ -258,10 +346,18 @@ class TestKeyCaching:
         service = TokenService(counting_provider)
 
         await service.issue_access_token(
-            user_id=uuid4(), tenant_id=uuid4(), role=Role.OWNER, permissions_version=0
+            user_id=uuid4(),
+            tenant_id=uuid4(),
+            role=Role.OWNER,
+            permissions=frozenset(),
+            permissions_version=0,
         )
         token = await service.issue_access_token(
-            user_id=uuid4(), tenant_id=uuid4(), role=Role.OWNER, permissions_version=0
+            user_id=uuid4(),
+            tenant_id=uuid4(),
+            role=Role.OWNER,
+            permissions=frozenset(),
+            permissions_version=0,
         )
         await service.verify_access_token(token=token)
         await service.build_jwks()

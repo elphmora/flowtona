@@ -8,6 +8,21 @@ lifetimes; this service is what knows the difference. app/security/jwt.py
 stays a stateless signing/verification primitive with no opinion on
 either.
 
+issue_access_token() now takes `permissions: frozenset[Permission]` as
+an explicit parameter, added when client-service's design review
+surfaced that role alone is insufficient to reproduce identity-
+service's actual authorization policy — PermissionService.
+effective_permissions() also accounts for membership status and the
+Decision 18 soft gate, neither of which TokenService has any way to
+evaluate itself (it has no User or TenantMembership, only scalars).
+TokenService deliberately does NOT call PermissionService — that would
+force this service to acquire domain objects it currently has no
+business owning, and blur the same claims-shape/policy boundary this
+module's docstring already draws. The caller (AuthService, which
+already has both objects at every call site) resolves effective
+permissions BEFORE calling this method and hands the resolved set
+straight through — TokenService only shapes it into a claim.
+
 Keys are cached as PARSED objects (EllipticCurvePrivateKey/PublicKey),
 not just raw bytes, since PyJWT re-parses PEM bytes internally on
 every call otherwise. Caching happens lazily on first call, not at
@@ -69,6 +84,7 @@ from cryptography.hazmat.primitives.asymmetric.ec import (
     EllipticCurvePublicKey,
 )
 
+from app.constants.permissions import Permission
 from app.constants.roles import Role
 from app.core.config import settings
 from app.exceptions.token import (
@@ -104,6 +120,16 @@ def _require_str_claim(raw_claims: dict[str, object], key: str) -> str:
 def _require_int_claim(raw_claims: dict[str, object], key: str) -> int:
     value = raw_claims.get(key)
     if not isinstance(value, int):
+        raise KeyError(key)
+    return value
+
+
+def _require_str_list_claim(raw_claims: dict[str, object], key: str) -> list[str]:
+    """Same reasoning as _require_str_claim, for the "permissions"
+    claim specifically — a list whose every element must itself be a
+    str, not just any list."""
+    value = raw_claims.get(key)
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise KeyError(key)
     return value
 
@@ -161,13 +187,24 @@ class TokenService:
         user_id: UUID,
         tenant_id: UUID,
         role: Role,
+        permissions: frozenset[Permission],
         permissions_version: int,
     ) -> str:
+        """permissions is the ALREADY-RESOLVED effective permission set
+        for this user/membership pair — the caller (AuthService) is
+        responsible for calling PermissionService.effective_permissions()
+        before this, not this method. See module docstring."""
         now = datetime.now(timezone.utc)
         claims = {
             "sub": str(user_id),
             "tenant_id": str(tenant_id),
             "role": role.value,
+            # sorted(): frozenset has no stable iteration order: two
+            # calls with an identical set could otherwise serialize
+            # differently. The set semantics don't depend on order,
+            # but a deterministic payload is easier to test and to
+            # inspect by hand.
+            "permissions": sorted(permission.value for permission in permissions),
             "permissions_version": permissions_version,
             "token_type": _ACCESS_TOKEN_TYPE,
             "jti": str(uuid4()),
@@ -203,12 +240,21 @@ class TokenService:
                 user_id=UUID(_require_str_claim(raw_claims, "sub")),
                 tenant_id=UUID(_require_str_claim(raw_claims, "tenant_id")),
                 role=Role(_require_str_claim(raw_claims, "role")),
+                permissions=frozenset(
+                    Permission(value)
+                    for value in _require_str_list_claim(raw_claims, "permissions")
+                ),
                 permissions_version=_require_int_claim(
                     raw_claims, "permissions_version"
                 ),
                 jti=UUID(_require_str_claim(raw_claims, "jti")),
             )
         except (KeyError, ValueError) as exc:
+            # Covers a missing/malformed permissions claim AND an
+            # unrecognized permission value inside it (Permission(value)
+            # raises ValueError for anything not in the enum) — a token
+            # claiming a permission that doesn't exist is exactly as
+            # invalid as one missing a required claim entirely.
             raise InvalidAccessTokenError() from exc
 
     async def issue_preauth_token(self, *, user_id: UUID) -> str:

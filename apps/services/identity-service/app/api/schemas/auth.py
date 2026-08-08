@@ -13,7 +13,9 @@ that actually use them.
 
 from typing import Annotated, Literal
 from uuid import UUID
+
 from pydantic import BaseModel, EmailStr, Field, StringConstraints, field_validator
+
 from app.constants.roles import Role
 
 

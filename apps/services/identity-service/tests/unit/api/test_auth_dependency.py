@@ -53,7 +53,11 @@ class TestGetCurrentClaims:
     async def test_valid_token_succeeds(self, client, registry):
         user_id, tenant_id = uuid4(), uuid4()
         access_token = await registry.token_service.issue_access_token(
-            user_id=user_id, tenant_id=tenant_id, role=Role.OWNER, permissions_version=0
+            user_id=user_id,
+            tenant_id=tenant_id,
+            role=Role.OWNER,
+            permissions=frozenset(),
+            permissions_version=0,
         )
 
         response = client.get(

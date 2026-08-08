@@ -12,6 +12,17 @@ service's "schedule:read" and identity-service's "schedule:read"-adjacent
 concerns won't collide or need disambiguating prefixes the way a flat
 can_* namespace would). This replaces the can_* names used in earlier
 drafts of the API contract; 01-api-contract.md has been updated to match.
+
+CLIENTS_READ/CLIENTS_WRITE added implementing client-service-
+architecture.md Decision 3 (owner/dispatcher: both; technician:
+CLIENTS_READ only) — this is the ONE place that mapping is allowed to
+live, per the whole cross-service architecture: permissions are
+resolved centrally here and embedded in the access token, never
+re-derived from `role` by a consuming service. Deliberately NOT added
+to SOFT_GATED_PERMISSIONS — client-service's own ADR treats client
+management as core day-1 functionality for a field-service business,
+the same category SCHEDULE_READ is already in below, not an
+administrative/billing action worth gating behind email verification.
 """
 
 from enum import StrEnum
@@ -23,6 +34,8 @@ class Permission(StrEnum):
     BILLING_MANAGE = "billing:manage"
     SCHEDULE_READ = "schedule:read"
     MEMBERS_INVITE = "members:invite"
+    CLIENTS_READ = "clients:read"
+    CLIENTS_WRITE = "clients:write"
 
 
 ROLE_PERMISSIONS: dict[Role, frozenset[Permission]] = {
@@ -31,17 +44,22 @@ ROLE_PERMISSIONS: dict[Role, frozenset[Permission]] = {
             Permission.BILLING_MANAGE,
             Permission.SCHEDULE_READ,
             Permission.MEMBERS_INVITE,
+            Permission.CLIENTS_READ,
+            Permission.CLIENTS_WRITE,
         }
     ),
     Role.DISPATCHER: frozenset(
         {
             Permission.SCHEDULE_READ,
             Permission.MEMBERS_INVITE,
+            Permission.CLIENTS_READ,
+            Permission.CLIENTS_WRITE,
         }
     ),
     Role.TECHNICIAN: frozenset(
         {
             Permission.SCHEDULE_READ,
+            Permission.CLIENTS_READ,
         }
     ),
 }
@@ -59,9 +77,10 @@ def permissions_for_role(role: Role) -> frozenset[Permission]:
 # PermissionService. Decision 18's own text names "inviting teammates"
 # and "anything billing-related" as gated behind email confirmation —
 # that maps directly to these two permissions. SCHEDULE_READ (viewing
-# your own schedule) is basic functionality, not team/billing
-# management, so it's deliberately NOT in this set — it stays available
-# regardless of verification status.
+# your own schedule) and CLIENTS_READ/CLIENTS_WRITE (client-service
+# Decision 3 — core field-service business functionality, not team/
+# billing management) are deliberately NOT in this set — they stay
+# available regardless of verification status.
 SOFT_GATED_PERMISSIONS: frozenset[Permission] = frozenset(
     {
         Permission.BILLING_MANAGE,

@@ -10,6 +10,7 @@ from uuid import UUID
 
 from pydantic import Field
 
+from app.constants.permissions import Permission
 from app.constants.roles import Role
 from app.models.base import DomainModel
 
@@ -21,6 +22,17 @@ class AccessTokenClaims(DomainModel):
     already verified the token's signature, standard claims, and
     token_type. Never constructed directly from untrusted input.
 
+    permissions is the resolved effective permission set at issuance
+    time (PermissionService.effective_permissions(), computed by
+    AuthService before calling issue_access_token() — TokenService
+    itself has no opinion on authorization policy, see its own module
+    docstring). This is why permissions_version exists alongside it,
+    not instead of it: permissions is a point-in-time snapshot that can
+    go stale if the underlying policy changes mid-session (e.g.
+    verify_email() lifting the soft gate); permissions_version is what
+    lets a caller detect that staleness without needing to decode and
+    compare the claim itself.
+
     jti included even though nothing currently revokes individual
     access tokens by it — provides traceability and supports a future
     deny-list or audit mechanism without a claims-shape migration when
@@ -29,6 +41,7 @@ class AccessTokenClaims(DomainModel):
     user_id: UUID
     tenant_id: UUID
     role: Role
+    permissions: frozenset[Permission]
     # ge=0, not ge=1 — 0 is the real initial value for a brand-new
     # TenantMembership, not a placeholder or impossible one.
     permissions_version: int = Field(ge=0)
