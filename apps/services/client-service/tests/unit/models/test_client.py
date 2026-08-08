@@ -42,3 +42,16 @@ class TestClientConstruction:
         re-testing Python's own Enum pass-through)."""
         with pytest.raises(ValidationError):
             Client(tenant_id=uuid4(), name="A", client_type="not_a_real_type")  # type: ignore[arg-type]
+
+
+class TestClientAssignment:
+    """validate_assignment=True means Client's validators
+    run on attribute assignment, not just construction — these tests
+    confirm that's actually true, not assumed from the config flag."""
+
+    def test_assigning_blank_name_raises(self) -> None:
+        client = Client(
+            tenant_id=uuid4(), name="Valid Co.", client_type=ClientType.COMMERCIAL
+        )
+        with pytest.raises(ValidationError, match="must not be blank"):
+            client.name = "   "

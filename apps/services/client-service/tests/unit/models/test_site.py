@@ -56,3 +56,18 @@ class TestSiteConstruction:
         assert site.label == "Renamed"
         with pytest.raises(ValidationError):
             site.address.city = "London"  # type: ignore[misc]
+
+
+class TestSiteAssignment:
+    """validate_assignment=True — confirms Site's
+    validators actually run on assignment, not just construction."""
+
+    def test_assigning_blank_label_raises(self) -> None:
+        site = Site(
+            client_id=uuid4(),
+            tenant_id=uuid4(),
+            label="Valid Label",
+            address=_address(),
+        )
+        with pytest.raises(ValidationError, match="must not be blank"):
+            site.label = "   "
