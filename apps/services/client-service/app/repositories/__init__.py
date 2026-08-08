@@ -7,6 +7,7 @@ from app.repositories.contact_repository import ContactRepository
 from app.repositories.exceptions import (
     ConcurrentUpdateError,
     DuplicateEntryError,
+    ImmutableFieldError,
     RecordArchivedError,
     RecordNotFoundError,
 )
@@ -18,6 +19,7 @@ __all__ = [
     "ConcurrentUpdateError",
     "ContactRepository",
     "DuplicateEntryError",
+    "ImmutableFieldError",
     "RecordArchivedError",
     "RecordNotFoundError",
     "SiteRepository",
