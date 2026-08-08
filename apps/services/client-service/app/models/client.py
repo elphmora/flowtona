@@ -28,9 +28,17 @@ class Client(BaseModel):
     claim — this model doesn't enforce that itself (a domain model has
     no way to know where a value came from), the repository/service
     layers do, per Decision 2's structural rule.
+
+    validate_assignment=True (matching identity-service's User) —
+    Client is deliberately mutable, and service-layer code will assign
+    to fields (e.g. client.name = new_name) before handing the model to
+    ClientRepository.update(). Without this, NonBlankStr's validator
+    only runs at construction — an assignment like client.name = "   "
+    would silently succeed. This closes that gap the same way
+    construction-time validation already does.
     """
 
-    model_config = ConfigDict(frozen=False)
+    model_config = ConfigDict(frozen=False, validate_assignment=True)
 
     id: UUID = Field(default_factory=uuid4)
     tenant_id: UUID

@@ -30,9 +30,15 @@ class Site(BaseModel):
     not this model's — a domain model here is a typed single-record
     construct, it has no visibility into a client's other sites to
     check the invariant against.
+
+    validate_assignment=True — same reasoning as Client: Site is
+    mutable, and service-layer code assigns to fields (e.g.
+    site.is_primary = True) before calling SiteRepository.update().
+    Without this, label's NonBlankStr check would only run at
+    construction, not on assignment.
     """
 
-    model_config = ConfigDict(frozen=False)
+    model_config = ConfigDict(frozen=False, validate_assignment=True)
 
     id: UUID = Field(default_factory=uuid4)
     client_id: UUID

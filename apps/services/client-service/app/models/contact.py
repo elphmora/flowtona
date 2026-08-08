@@ -7,6 +7,7 @@ Contact domain model — client-service-architecture.md Decision 4.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
@@ -28,9 +29,16 @@ class Contact(BaseModel):
     Address.line1,city,postcode. email/phone use a different kind of
     domain invariant, below — not "this field can't be blank" but
     "at least one of these two optional fields must be present."
+
+    validate_assignment=True so domain invariants are enforced on
+    attribute updates as well as construction. The email-or-phone
+    invariant intentionally uses `mode="before"` so a failed assignment
+    is rejected before mutating the instance, rather than after — see
+    client-service-architecture.md's Entity & Convention Clarifications
+    for the full reasoning and the experiment that confirmed it.
     """
 
-    model_config = ConfigDict(frozen=False)
+    model_config = ConfigDict(frozen=False, validate_assignment=True)
 
     id: UUID = Field(default_factory=uuid4)
     client_id: UUID
@@ -44,18 +52,18 @@ class Contact(BaseModel):
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
-    @model_validator(mode="after")
-    def _require_email_or_phone(self) -> Contact:
+    @model_validator(mode="before")
+    @classmethod
+    def _require_email_or_phone(cls, data: Any) -> Any:
         """Decision 8: a Contact with neither email nor phone is not
-        addressable and not useful.
-
-        Enforced here, at the domain model, so this invariant holds for
-        every construction path, including a service constructing a
-        Contact directly (e.g. a future import/migration workflow) that
-        doesn't go through a request schema at all — same rationale as
-        NonBlankStr above, just for a completeness check across two
-        optional fields rather than a single required one.
+        addressable and not useful. mode="before" deliberately — see
+        the class docstring. isinstance(data, dict) guards against a
+        non-dict input shape; under the Pydantic version this project
+        uses, assignment was confirmed to always pass a dict here, but
+        the guard costs nothing and protects against a future Pydantic
+        version changing that observed (not contractually guaranteed)
+        behavior.
         """
-        if not self.email and not self.phone:
+        if isinstance(data, dict) and not data.get("email") and not data.get("phone"):
             raise ValueError("Contact requires at least one of email or phone")
-        return self
+        return data

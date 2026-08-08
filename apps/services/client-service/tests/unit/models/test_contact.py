@@ -77,3 +77,60 @@ class TestContactConstruction:
                 name="Priya Shah",
                 email="not-an-email",
             )
+
+
+class TestContactAssignment:
+    """validate_assignment=True — confirms Contact's
+    validators, including the cross-field email-or-phone check, run on
+    assignment, not just construction."""
+
+    def test_assigning_blank_name_raises(self) -> None:
+        contact = Contact(
+            client_id=uuid4(),
+            tenant_id=uuid4(),
+            name="Priya Shah",
+            phone="+44 121 000 0000",
+        )
+        with pytest.raises(ValidationError, match="must not be blank"):
+            contact.name = "   "
+
+    def test_removing_last_contact_method_raises_and_leaves_object_unchanged(
+        self,
+    ) -> None:
+        """A phone-only Contact clearing its phone via assignment must
+        be rejected. Critically, this proves more than "an exception
+        was raised" — it proves the object is left completely
+        unchanged afterward. _require_email_or_phone runs as a
+        `mode="before"` validator specifically so this holds: a
+        `mode="after"` validator would raise here too, but Pydantic
+        would have already committed phone=None to the instance before
+        the validator ran, leaving a corrupted object (both email and
+        phone None) behind the raised exception. See Contact's class
+        docstring for the full reasoning."""
+        contact = Contact(
+            client_id=uuid4(),
+            tenant_id=uuid4(),
+            name="Priya Shah",
+            phone="+44 121 000 0000",
+        )
+        with pytest.raises(ValidationError, match="at least one of email or phone"):
+            contact.phone = None
+
+        assert contact.phone == "+44 121 000 0000"
+        assert contact.email is None
+
+    def test_adding_second_contact_method_succeeds(self) -> None:
+        """Positive-path counterpart to the test above — confirms the
+        mode="before" rewrite didn't accidentally break legitimate
+        assignment, only the invalid case. A phone-only Contact gaining
+        an email (going from one contact method to two) must still
+        succeed."""
+        contact = Contact(
+            client_id=uuid4(),
+            tenant_id=uuid4(),
+            name="Priya Shah",
+            phone="+44 121 000 0000",
+        )
+        contact.email = "priya@example.com"
+        assert contact.email == "priya@example.com"
+        assert contact.phone == "+44 121 000 0000"
