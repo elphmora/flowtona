@@ -20,6 +20,13 @@ one. Any here would surrender real mypy protection for flexibility this
 service doesn't currently need. If a genuine non-UUID identifier
 appears later, revisit the type then.
 
+ImmutableFieldError's `expected`/`actual` fields stay Any, deliberately
+not narrowed the same way `identifier` was — they hold whatever value
+the mismatched field actually carries, which varies per field
+(currently always UUID for tenant_id/client_id, but this exception
+isn't scoped to those two fields specifically, and a future
+identity-defining field on some entity could be a different type).
+
 RecordArchivedError is new here, not present in identity-service's
 equivalent file. client-service is the first service with a genuinely
 terminal, fully-immutable record state (Client.status == ARCHIVED,
@@ -31,6 +38,7 @@ gains a second archivable entity, without needing a rename.
 """
 
 from dataclasses import dataclass
+from typing import Any
 from uuid import UUID
 
 
@@ -78,3 +86,23 @@ class RecordArchivedError(Exception):
 
     entity: str
     identifier: UUID
+
+
+@dataclass
+class ImmutableFieldError(Exception):
+    """Raised when update() is called with an identity-defining field
+    (e.g. tenant_id, client_id) changed from its stored value. Such
+    fields define a record's identity and repository index keys —
+    silently rewriting them would corrupt those indexes. A deliberate
+    rejection, not missing functionality; NotImplementedError would
+    misleadingly suggest the opposite.
+
+    expected/actual carry the stored value and the caller's attempted
+    value, so a production log line from this exception is enough to
+    diagnose the mismatch without needing to reproduce it."""
+
+    entity: str
+    field: str
+    identifier: UUID
+    expected: Any
+    actual: Any
