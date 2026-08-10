@@ -37,6 +37,12 @@ def _extract_request_id(scope: Scope) -> str | None:
     """Reads and validates X-Request-ID from raw ASGI headers (a list
     of (bytes, bytes) tuples). Returns None if absent or invalid.
 
+    If the header appears more than once (unusual for a well-behaved
+    single client, but representable at the raw ASGI level), the FIRST
+    occurrence wins — an explicit policy, not an accidental byproduct
+    of loop order; "reject outright" or "last wins" would both also be
+    defensible, this is simply the one chosen.
+
     Deliberately strict (alphanumeric plus -_. only) — Flowtona owns
     request IDs completely for now; this does not attempt to accept
     other formats (e.g. W3C Trace Context). Revisit if upstream trace
