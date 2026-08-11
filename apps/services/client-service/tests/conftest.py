@@ -1,19 +1,14 @@
 """
-tests/unit/conftest.py
+tests/conftest.py
 
-Shared fixtures for real ES256/JWKS test infrastructure — automatically
-available to every test package under tests/unit/ (security/, api/,
-and any future package needing the same infrastructure) via pytest's
-standard conftest.py inheritance. Promoted here from tests/unit/
-security/conftest.py once a second package (tests/unit/api/) needed
-the same infrastructure — a concrete reuse need, not premature
-abstraction.
-
-When Platform Conventions §8's real "integration test" tier
-(tests/integration/, real create_app()) eventually needs the same
-infrastructure, promote this one file up to tests/conftest.py then —
-a cheap, well-understood move, not a reason to place it there
-speculatively now for a need that doesn't exist yet.
+Shared fixtures for real ES256/JWKS test infrastructure — at the
+tests/ ROOT (promoted from tests/unit/conftest.py), so both
+tests/unit/security/, tests/unit/api/, and tests/integration/ inherit
+it. This is the trigger tests/unit/conftest.py's own docstring named
+in advance ("promote once the real integration tier needs the same
+infrastructure") — feature/client-service-clients-api's cross-tenant
+matrix is the first test that actually needs real signed JWTs against
+the real create_app(), not a speculative move made ahead of that need.
 
 Plain constants/classes/helpers live in tests/unit/auth_fixtures.py;
 this file only holds the actual @pytest.fixture-decorated functions.
