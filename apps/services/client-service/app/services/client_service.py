@@ -33,6 +33,11 @@ from app.exceptions.client import (
     ClientArchivedError,
     ClientNotFoundError,
 )
+from app.metrics.business_metrics import (
+    CLIENT_ARCHIVED_TOTAL,
+    CLIENT_ARCHIVED_WRITE_REJECTED_TOTAL,
+    CLIENT_CREATED_TOTAL,
+)
 from app.models.client import Client
 from app.models.enums import ClientStatus, ClientType
 from app.models.types import utc_now
@@ -47,9 +52,11 @@ class ClientService:
     async def create_client(
         self, *, tenant_id: UUID, name: str, client_type: ClientType
     ) -> Client:
-        return await self._client_repo.create(
+        client = await self._client_repo.create(
             tenant_id=tenant_id, name=name, client_type=client_type
         )
+        CLIENT_CREATED_TOTAL.inc()
+        return client
 
     async def get_client(self, *, tenant_id: UUID, client_id: UUID) -> Client:
         client = await self._client_repo.get_by_id(
@@ -112,17 +119,37 @@ class ClientService:
         try:
             return await self._client_repo.update(client=updated)
         except RecordArchivedError as exc:
+            # A second, independent path to ClientArchivedError,
+            # distinct from require_writable_client() below — update()
+            # catches the repository's own archived-check directly,
+            # rather than calling require_writable_client() first.
+            # Counted here too, or a PATCH against an archived client
+            # (the most likely real case a caller hits) would silently
+            # not increment this counter at all.
+            CLIENT_ARCHIVED_WRITE_REJECTED_TOTAL.inc()
             raise ClientArchivedError() from exc
         except RecordNotFoundError as exc:
             raise ClientNotFoundError() from exc
 
     async def archive_client(self, *, tenant_id: UUID, client_id: UUID) -> Client:
+        """Idempotent (ClientRepository.archive()'s own contract) —
+        the metric must not be. A retried DELETE against an already-
+        archived client is one real archive event, not two; checking
+        status first, before calling archive(), is what makes the
+        counter reflect actual transitions rather than API calls."""
+        existing = await self.get_client(tenant_id=tenant_id, client_id=client_id)
+        was_already_archived = existing.status == ClientStatus.ARCHIVED
+
         try:
-            return await self._client_repo.archive(
+            client = await self._client_repo.archive(
                 tenant_id=tenant_id, client_id=client_id, archived_at=utc_now()
             )
         except RecordNotFoundError as exc:
             raise ClientNotFoundError() from exc
+
+        if not was_already_archived:
+            CLIENT_ARCHIVED_TOTAL.inc()
+        return client
 
     async def require_writable_client(
         self, *, tenant_id: UUID, client_id: UUID
@@ -132,5 +159,6 @@ class ClientService:
         returns the client otherwise."""
         client = await self.get_client(tenant_id=tenant_id, client_id=client_id)
         if client.status == ClientStatus.ARCHIVED:
+            CLIENT_ARCHIVED_WRITE_REJECTED_TOTAL.inc()
             raise ClientArchivedError()
         return client

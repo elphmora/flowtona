@@ -24,6 +24,7 @@ from fastapi import Depends
 from app.api.auth_dependency import get_current_claims
 from app.constants.permissions import ClientPermission
 from app.exceptions.auth import InsufficientPermissionError
+from app.metrics.business_metrics import PERMISSION_DENIED_TOTAL
 from app.security.token_verifier import AccessTokenClaims
 
 AuthenticatedClaims = Annotated[
@@ -37,6 +38,7 @@ def require_permission(
 ) -> Callable[..., Coroutine[Any, Any, AccessTokenClaims]]:
     async def _check(claims: AuthenticatedClaims) -> AccessTokenClaims:
         if permission not in claims.permissions:
+            PERMISSION_DENIED_TOTAL.labels(permission=permission).inc()
             raise InsufficientPermissionError()
         return claims
 

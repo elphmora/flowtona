@@ -46,9 +46,10 @@ regardless of their relative order — see client-service-architecture.md
 for the full reasoning.
 
 System routers (health, info, metrics) mount at the unversioned root,
-per Platform Conventions §9. Future business routers (clients, sites,
-contacts — not built yet) belong under /v1 once they exist; no empty
-/v1 plumbing is added here in anticipation of them.
+per Platform Conventions §9. Business routers mount under /v1 —
+clients (feature/client-service-clients-api) is the first; sites and
+contacts follow in their own branches once built, not added here
+speculatively ahead of them.
 
 Integration tests using create_app() must use TestClient as a context
 manager for the lifespan handler to execute:
@@ -69,6 +70,7 @@ from app.api.errors import register_exception_handlers
 from app.api.system.health import router as health_router
 from app.api.system.info import router as info_router
 from app.api.system.metrics import router as metrics_router
+from app.api.v1.clients import router as clients_router
 from app.core.config import Settings
 from app.middleware.metrics import add_metrics_middleware
 from app.middleware.request_id import add_request_id_middleware
@@ -102,6 +104,7 @@ def create_app(
 
     app.include_router(health_router)
     app.include_router(info_router)
+    app.include_router(clients_router)
     if resolved_settings.METRICS_ENABLED:
         app.include_router(metrics_router)
 
