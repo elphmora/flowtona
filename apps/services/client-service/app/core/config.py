@@ -35,6 +35,11 @@ class Settings(BaseSettings):
     SERVICE_VERSION: str = "0.1.0"
     ENVIRONMENT: Environment = Environment.LOCAL
 
+    # Injected by CI/CD during build. Defaults are only for local
+    # development.
+    BUILD_ID: str = "unknown"
+    GIT_SHA: str = "unknown"
+
     # Server
     HOST: str = "0.0.0.0"
     PORT: int = 8000
