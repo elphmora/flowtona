@@ -17,8 +17,9 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric import ec
 
 from app.exceptions.auth import InvalidAccessTokenError
+from app.metrics.auth_metrics import JWT_VERIFICATION_FAILURES_TOTAL
 from app.security.token_verifier import TokenVerifier
-from tests.unit.security.conftest import TEST_AUDIENCE, TEST_ISSUER, TEST_KEY_ID
+from tests.unit.auth_fixtures import TEST_AUDIENCE, TEST_ISSUER, TEST_KEY_ID
 
 
 def _default_claims(**overrides) -> dict:
@@ -354,3 +355,132 @@ class TestJWKSCaching:
             verifier.verify(token)
 
         assert jwks_server.request_count == 1
+
+
+def _reason_total(reason: str) -> float:
+    metric = next(iter(JWT_VERIFICATION_FAILURES_TOTAL.collect()))
+
+    for sample in metric.samples:
+        if sample.name.endswith("_total") and sample.labels == {"reason": reason}:
+            return sample.value
+
+    return 0.0
+
+
+class TestVerificationFailureReasonMetric:
+    """Proves two things together: the reason-labeled counter fires
+    correctly for each failure mode, AND the external behavior — a
+    single uniform InvalidAccessTokenError, still just a 401 to any
+    caller — is completely unchanged by adding it. Delta-based
+    (before -> after), since JWT_VERIFICATION_FAILURES_TOTAL is a
+    module-level Prometheus singleton persisting across every test in
+    the process."""
+
+    def test_expired_token_reason_is_expired(self, keypair, settings):
+        private_key, _public_key = keypair
+        token = _make_token(
+            private_key,
+            iat=datetime.now(timezone.utc) - timedelta(hours=1),
+            exp=datetime.now(timezone.utc) - timedelta(minutes=1),
+        )
+
+        before = _reason_total("expired")
+        with pytest.raises(InvalidAccessTokenError):
+            TokenVerifier(settings).verify(token)
+        after = _reason_total("expired")
+
+        assert after - before == 1
+
+    def test_wrong_issuer_reason_is_invalid_claims(self, keypair, settings):
+        private_key, _public_key = keypair
+        token = _make_token(private_key, iss="https://not-identity-service.example")
+
+        before = _reason_total("invalid_claims")
+        with pytest.raises(InvalidAccessTokenError):
+            TokenVerifier(settings).verify(token)
+        after = _reason_total("invalid_claims")
+
+        assert after - before == 1
+
+    def test_unknown_kid_reason_is_key_resolution_failed(self, keypair, settings):
+        private_key, _public_key = keypair
+        token = _make_token(private_key, key_id="a-kid-never-published-to-jwks")
+
+        before = _reason_total("key_resolution_failed")
+        with pytest.raises(InvalidAccessTokenError):
+            TokenVerifier(settings).verify(token)
+        after = _reason_total("key_resolution_failed")
+
+        assert after - before == 1
+
+    def test_structurally_malformed_token_reason_is_malformed_token(self, settings):
+        before = _reason_total("malformed_token")
+        with pytest.raises(InvalidAccessTokenError):
+            TokenVerifier(settings).verify("not-a-real-jwt")
+        after = _reason_total("malformed_token")
+
+        assert after - before == 1
+
+    def test_wrong_token_type_reason_is_wrong_token_type(self, keypair, settings):
+        private_key, _public_key = keypair
+        token = _make_token(private_key, token_type="preauth")
+
+        before = _reason_total("wrong_token_type")
+        with pytest.raises(InvalidAccessTokenError):
+            TokenVerifier(settings).verify(token)
+        after = _reason_total("wrong_token_type")
+
+        assert after - before == 1
+
+    def test_malformed_permissions_reason_is_malformed_application_claims(
+        self, keypair, settings
+    ):
+        private_key, _public_key = keypair
+        token = _make_token(private_key, permissions="clients:read")
+
+        before = _reason_total("malformed_application_claims")
+        with pytest.raises(InvalidAccessTokenError):
+            TokenVerifier(settings).verify(token)
+        after = _reason_total("malformed_application_claims")
+
+        assert after - before == 1
+
+    def test_malformed_uuid_claim_reason_is_malformed_application_claims(
+        self, keypair, settings
+    ):
+        private_key, _public_key = keypair
+        token = _make_token(private_key, sub="not-a-valid-uuid")
+
+        before = _reason_total("malformed_application_claims")
+        with pytest.raises(InvalidAccessTokenError):
+            TokenVerifier(settings).verify(token)
+        after = _reason_total("malformed_application_claims")
+
+        assert after - before == 1
+
+    def test_external_behavior_unchanged_still_uniform_invalid_access_token_error(
+        self, keypair, settings
+    ):
+        """The whole point of this design: no matter which reason
+        fires internally, every caller still only ever sees one
+        exception type. Proven across several distinct failure modes
+        in a single test, deliberately, since the risk being guarded
+        against is exactly "some failure mode accidentally started
+        leaking a different exception type or extra detail"."""
+        private_key, _public_key = keypair
+        verifier = TokenVerifier(settings)
+
+        expired = _make_token(
+            private_key,
+            iat=datetime.now(timezone.utc) - timedelta(hours=1),
+            exp=datetime.now(timezone.utc) - timedelta(minutes=1),
+        )
+        wrong_issuer = _make_token(
+            private_key, iss="https://not-identity-service.example"
+        )
+        malformed = "not-a-real-jwt"
+
+        for bad_token in (expired, wrong_issuer, malformed):
+            with pytest.raises(InvalidAccessTokenError) as exc_info:
+                verifier.verify(bad_token)
+            assert type(exc_info.value) is InvalidAccessTokenError
