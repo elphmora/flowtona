@@ -1,21 +1,39 @@
 """
 app/api/schemas/site.py
 
-Read-only response shape only — used to embed a client's sites in
-GET/POST /v1/clients/{client_id} (Decision 6). Create/update request
-schemas and the dedicated /v1/clients/{client_id}/sites routes belong
-to feature/client-service-sites-api, not this branch — this file
-exists now only because the client detail response needs to render
-sites that already exist.
+SiteResponse (read-only) was built in feature/client-service-clients-
+api, for embedding a client's sites in GET/POST /v1/clients/{id}.
+SiteCreateRequest/SiteUpdateRequest are new here — the request side of
+the dedicated /v1/clients/{client_id}/sites routes.
 """
 
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
-from app.api.schemas.address import AddressResponse
+from app.api.schemas.address import AddressRequest, AddressResponse
 from app.models.site import Site
+from app.models.types import NonBlankStr
+
+
+class SiteCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    label: NonBlankStr
+    address: AddressRequest
+    is_primary: bool | None = None
+
+
+class SiteUpdateRequest(BaseModel):
+    """Partial update — all fields optional, only supplied ones are
+    changed."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    label: NonBlankStr | None = None
+    address: AddressRequest | None = None
+    is_primary: bool | None = None
 
 
 class SiteResponse(BaseModel):

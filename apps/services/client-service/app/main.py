@@ -71,6 +71,7 @@ from app.api.system.health import router as health_router
 from app.api.system.info import router as info_router
 from app.api.system.metrics import router as metrics_router
 from app.api.v1.clients import router as clients_router
+from app.api.v1.sites import router as sites_router
 from app.core.config import Settings
 from app.middleware.metrics import add_metrics_middleware
 from app.middleware.request_id import add_request_id_middleware
@@ -105,6 +106,7 @@ def create_app(
     app.include_router(health_router)
     app.include_router(info_router)
     app.include_router(clients_router)
+    app.include_router(sites_router)
     if resolved_settings.METRICS_ENABLED:
         app.include_router(metrics_router)
 

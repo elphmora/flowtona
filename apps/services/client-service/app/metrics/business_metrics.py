@@ -43,3 +43,16 @@ PERMISSION_DENIED_TOTAL = Counter(
     "Total requests rejected for insufficient permission",
     ["permission"],
 )
+
+SITE_CREATED_TOTAL = Counter(
+    "site_created_total",
+    "Total sites created",
+)
+
+SITE_DELETE_CONTACT_NULLED_TOTAL = Counter(
+    "site_delete_contact_nulled_total",
+    "Total contacts detached (site_id nulled) as a side effect of "
+    "site deletion — incremented by the count SiteService.delete_site() "
+    "returns (ContactRepository.clear_site_assignment()'s own return "
+    "value), not by counting contacts separately at the route layer.",
+)

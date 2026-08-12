@@ -32,6 +32,10 @@ SiteRepository, by design (client-service-architecture.md Decisions 4,
 from uuid import UUID
 
 from app.exceptions.site import SiteNotFoundError
+from app.metrics.business_metrics import (
+    SITE_CREATED_TOTAL,
+    SITE_DELETE_CONTACT_NULLED_TOTAL,
+)
 from app.models.address import Address
 from app.models.site import Site
 from app.models.types import utc_now
@@ -59,7 +63,7 @@ class SiteService:
         client_id: UUID,
         label: str,
         address: Address,
-        is_primary: bool = False,
+        is_primary: bool | None = None,
     ) -> Site:
         await self._client_service.require_writable_client(
             tenant_id=tenant_id, client_id=client_id
@@ -70,21 +74,26 @@ class SiteService:
         )
         is_first_site = len(existing_sites) == 0
         # Decision 4: the client's FIRST site is always auto-primary,
-        # regardless of what the caller requested.
-        resolved_is_primary = is_first_site or is_primary
+        # regardless of what the caller requested. is_primary stays
+        # bool | None up to this point specifically so the HTTP
+        # boundary never collapses "omitted" into "false" — once here,
+        # the service owns the business rule and can collapse freely.
+        resolved_is_primary = is_first_site or bool(is_primary)
 
         if resolved_is_primary:
             # Demote-first — see module docstring. A no-op when
             # is_first_site is True, since there's nothing to demote.
             await self._demote_current_primary(tenant_id=tenant_id, client_id=client_id)
 
-        return await self._site_repo.create(
+        site = await self._site_repo.create(
             tenant_id=tenant_id,
             client_id=client_id,
             label=label,
             address=address,
             is_primary=resolved_is_primary,
         )
+        SITE_CREATED_TOTAL.inc()
+        return site
 
     async def get_site(
         self, *, tenant_id: UUID, client_id: UUID, site_id: UUID
@@ -141,10 +150,10 @@ class SiteService:
     ) -> int:
         """Decision 9's exact ordering. Returns the count of contacts
         detached — a genuine domain fact about the outcome of this
-        operation (how many contacts were affected), not a value that
-        exists solely to feed site_delete_contact_nulled_total. The
-        route layer can use it for that metric later, but that's a
-        consumer of this return value, not its reason for existing."""
+        operation, not a value that exists solely to feed
+        site_delete_contact_nulled_total. The metric is incremented
+        only after the site deletion itself succeeds, using this same
+        affected count."""
         await self._client_service.require_writable_client(
             tenant_id=tenant_id, client_id=client_id
         )
@@ -159,6 +168,9 @@ class SiteService:
             )
         except RecordNotFoundError as exc:
             raise SiteNotFoundError() from exc
+
+        if affected_count > 0:
+            SITE_DELETE_CONTACT_NULLED_TOTAL.inc(affected_count)
         return affected_count
 
     async def _demote_current_primary(
