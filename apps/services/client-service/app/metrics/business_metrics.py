@@ -56,3 +56,8 @@ SITE_DELETE_CONTACT_NULLED_TOTAL = Counter(
     "returns (ContactRepository.clear_site_assignment()'s own return "
     "value), not by counting contacts separately at the route layer.",
 )
+
+CONTACT_CREATED_TOTAL = Counter(
+    "contact_created_total",
+    "Total contacts created",
+)

@@ -51,6 +51,8 @@ def site_service(
 
 @pytest.fixture
 def contact_service(
-    contact_repo: InMemoryContactRepository, client_service: ClientService
+    contact_repo: InMemoryContactRepository,
+    client_service: ClientService,
+    site_service: SiteService,
 ) -> ContactService:
-    return ContactService(contact_repo, client_service)
+    return ContactService(contact_repo, client_service, site_service)

@@ -66,7 +66,7 @@ def build_services() -> ServiceRegistry:
     # --- Domain services ---
     client_service = ClientService(client_repo)
     site_service = SiteService(site_repo, contact_repo, client_service)
-    contact_service = ContactService(contact_repo, client_service)
+    contact_service = ContactService(contact_repo, client_service, site_service)
 
     return ServiceRegistry(
         client_service=client_service,
