@@ -10,13 +10,17 @@ pydantic-settings>=2.5
 # Prometheus metrics (app/middleware/metrics.py)
 prometheus-client>=0.20
 
-# Outbound HTTP -- ClientServiceClient (app/services/client_service_client.py),
-# the platform's first real internal service-to-service call. Moved here
-# from dev-only now that it's a genuine runtime dependency, not just a
-# TestClient tool.
+# Outbound HTTP -- ClientServiceClient
 httpx>=0.27
 
-# Not yet needed -- Phase 1 also adds JWT verification alongside the
-# first protected route:
-#   pyjwt[crypto]>=2.9      -- JWT verification via JWKS
-#   email-validator>=2.2    -- only if a schema actually uses EmailStr
+# JWT verification via JWKS (Platform Conventions §7)
+# [crypto] extra needed for ES256 verification, not just HS256
+pyjwt[crypto]>=2.9
+
+# Not yet needed:
+#   email-validator>=2.2    -- only if a schema actually uses EmailStr;
+#                             contact_email_snapshot may be stored as a
+#                             plain str (a frozen snapshot of already-
+#                             validated Client Service data, not a
+#                             live-validated field) -- decide when
+#                             that schema is built.

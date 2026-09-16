@@ -9,28 +9,16 @@ than at import time.
 
 A supplied ServiceRegistry is used directly, allowing integration tests
 to inject application dependencies without monkeypatching
-build_services(). `registry if registry is not None else
-build_services()` is used deliberately instead of `registry or
-build_services()` — this is dependency injection, not a truthiness
-check, and an explicitly-supplied-but-falsy registry (not possible
-today with an empty dataclass, but a real risk once ServiceRegistry
-grows fields) should never be silently discarded.
+build_services().
 
-The resolved Settings instance is stored on app.state.settings
-alongside app.state.services. This closes a real bug: /info previously
-constructed its own fresh Settings() independently of whatever settings
-create_app() was actually given, so a test supplying a custom Settings
-instance to create_app(settings=...) would see FastAPI's own title/
-version reflect it while GET /info silently reported different
-(default) values. There is now exactly one resolved runtime
-configuration object, read by every route that needs it.
-
-Phase 0 exposes only unversioned operational endpoints, unconditionally
-— no feature flag gates /metrics in this phase; that was a leftover
-from a draft that never actually defined the flag it referenced, which
-would have raised AttributeError on the first request. Business
-routes, JWT verification, permission dependencies and Client Service
-integration arrive with the Phase 1 Create Job vertical slice.
+TokenVerifier joins app.state this checkpoint -- deferred since Phase
+0 specifically because job-service had no protected route yet; POST
+/v1/jobs (landing next) is the first one. Stored as a separate, flat
+app.state.token_verifier attribute, not part of ServiceRegistry --
+matching client-service's own established distinction: it's a
+security/auth concern, not a business-service concern. Constructed
+unconditionally, every request: PyJWKClient fetches JWKS lazily and
+caches, so construction itself performs no network I/O.
 """
 
 from collections.abc import AsyncIterator
@@ -46,6 +34,7 @@ from app.api.system.metrics import router as metrics_router
 from app.core.config import Settings
 from app.middleware.metrics import add_metrics_middleware
 from app.middleware.request_id import add_request_id_middleware
+from app.security.token_verifier import TokenVerifier
 
 
 def create_app(
@@ -59,6 +48,7 @@ def create_app(
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.settings = resolved_settings
         app.state.services = registry if registry is not None else build_services()
+        app.state.token_verifier = TokenVerifier(resolved_settings)
         yield
 
     app = FastAPI(
