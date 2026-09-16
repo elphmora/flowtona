@@ -1,4 +1,4 @@
-# Runtime dependencies — job-service
+# Runtime dependencies -- job-service
 
 fastapi>=0.115
 uvicorn[standard]>=0.32
@@ -10,13 +10,13 @@ pydantic-settings>=2.5
 # Prometheus metrics (app/middleware/metrics.py)
 prometheus-client>=0.20
 
-# Not yet needed -- Phase 1 adds these alongside the first protected
-# route and Client Service call:
+# Outbound HTTP -- ClientServiceClient (app/services/client_service_client.py),
+# the platform's first real internal service-to-service call. Moved here
+# from dev-only now that it's a genuine runtime dependency, not just a
+# TestClient tool.
+httpx>=0.27
+
+# Not yet needed -- Phase 1 also adds JWT verification alongside the
+# first protected route:
 #   pyjwt[crypto]>=2.9      -- JWT verification via JWKS
-#   email-validator>=2.2    -- only if a Phase 1 schema actually uses
-#                             EmailStr; contact_email_snapshot may be
-#                             stored as a plain str (it's a frozen
-#                             snapshot of already-validated Client
-#                             Service data, not a live-validated
-#                             field) -- decide when that model is
-#                             built, don't add this speculatively now.
+#   email-validator>=2.2    -- only if a schema actually uses EmailStr

@@ -1,10 +1,7 @@
 """
 app/core/config.py
 
-job-service configuration. No signing key material (issues no tokens),
-no JWKS-consumer settings yet — those land in Phase 1 alongside the
-first protected route (see app/main.py's docstring history for why
-TokenVerifier itself is deferred).
+job-service configuration.
 """
 
 from enum import StrEnum
@@ -30,7 +27,13 @@ class Settings(BaseSettings):
     SERVICE_VERSION: str = "0.1.0"
     ENVIRONMENT: Environment = Environment.LOCAL
 
-    # Injected by CI/CD during build. Defaults are only for local
-    # development, where no build pipeline exists yet.
     BUILD: str = ""
     GIT_SHA: str = ""
+
+    # Client Service integration (Phase 1) -- internal REST over k8s
+    # DNS, per 01-domain-foundations.md §9. Timeout is DD-009's
+    # explicit placeholder (not derived from measured latency yet) --
+    # kept as a setting, not hardcoded, since DD-009 frames it as
+    # something that will need tuning later without a code change.
+    CLIENT_SERVICE_BASE_URL: str = "http://client-service:8000"
+    CLIENT_SERVICE_TIMEOUT_SECONDS: float = 2.0
