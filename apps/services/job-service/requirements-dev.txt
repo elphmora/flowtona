@@ -4,13 +4,8 @@
 
 # Testing
 pytest>=8.3
-pytest-asyncio>=0.24   # JobRepository Protocol methods will be async
-                        # (Phase 1 onward), matching the platform-wide
-                        # convention identity-service/client-service
-                        # both already follow
-httpx>=0.27             # FastAPI TestClient / integration tests
+pytest-asyncio>=0.24   # Repository/client Protocol methods are async
 
 # Code quality
 ruff>=0.7
-mypy>=1.13              # Enforces Protocol conformance via static
-                        # typing, not runtime
+mypy>=1.13
