@@ -1,9 +1,9 @@
 """
 tests/integration/test_main.py
 
-Verifies app ASSEMBLY itself — that create_app() wires lifespan
+Verifies app ASSEMBLY itself -- that create_app() wires lifespan
 correctly and that both the settings and registry injection seams
-actually work — not individual route behavior (that's
+actually work -- not individual route behavior (that's
 tests/unit/api/system/'s job).
 """
 
@@ -22,7 +22,11 @@ def test_default_registry_and_settings_are_populated_via_lifespan() -> None:
 
 
 def test_injected_registry_is_used_instead_of_default() -> None:
-    injected = build_services()
+    # build_services() now requires settings -- a real call-site
+    # regression from this checkpoint's signature change (Settings()
+    # needed to construct ClientServiceClient), caught by this
+    # pre-existing test, not something to silently work around.
+    injected = build_services(Settings())
     app = create_app(registry=injected)
     with TestClient(app):
         assert app.state.services is injected

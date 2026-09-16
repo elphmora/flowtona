@@ -10,8 +10,18 @@ missing/malformed header raise InvalidAccessTokenError and go through
 the RFC 9457 handler, instead of FastAPI's own generic HTTPException
 bypassing it.
 
-Declares dependencies via typing.Annotated, matching client-service's
-own (post-identity-service) convention.
+get_access_token() -- added during POST /v1/jobs's review. An earlier
+version of the route used BearerCredentials directly (typed
+HTTPAuthorizationCredentials | None) plus `assert credentials is not
+None`, relying on require_permission(...)'s own get_current_claims
+call having already rejected the None case first. That's an implicit
+coupling: the type says "might be None," the route architecture
+depends on a sibling dependency's ordering to make that untrue. This
+function establishes its own independent guarantee instead -- it
+raises InvalidAccessTokenError itself if credentials are missing,
+so its return type can honestly be `str`, never `str | None`, correct
+even if used alone on some future route with no require_permission(...)
+alongside it.
 """
 
 from typing import Annotated
@@ -60,3 +70,14 @@ async def get_current_claims(
     if credentials is None:
         raise InvalidAccessTokenError()
     return token_verifier.verify(credentials.credentials)
+
+
+async def get_access_token(credentials: BearerCredentials) -> str:
+    """The raw bearer token, required and never None -- for callers
+    that need to forward the original credential (e.g. Client Service
+    calls per Amendment 7) rather than the verified AccessTokenClaims.
+    Establishes its own guarantee independently of get_current_claims;
+    see module docstring."""
+    if credentials is None:
+        raise InvalidAccessTokenError()
+    return credentials.credentials
