@@ -186,6 +186,25 @@ class TestSignup:
         assert Permission.CLIENTS_READ in claims.permissions
         assert Permission.CLIENTS_WRITE in claims.permissions
 
+    async def test_access_token_includes_job_permissions_before_verification(
+        self, auth_service, all_services
+    ):
+        """JOBS_READ/JOBS_WRITE (job-service's own Create Job authorization
+        contract) are deliberately NOT in SOFT_GATED_PERMISSIONS — a fresh,
+        unverified owner must still have them, the same way CLIENTS_READ/
+        CLIENTS_WRITE and SCHEDULE_READ already do."""
+        session = await auth_service.signup(
+            email="dana@example.com",
+            password="hunter2",
+            display_name="Dana",
+            tenant_label="Dana's Plumbing",
+        )
+        claims = await all_services["token_service"].verify_access_token(
+            token=session.access_token
+        )
+        assert Permission.JOBS_READ in claims.permissions
+        assert Permission.JOBS_WRITE in claims.permissions
+
     async def test_sends_verification_email(self, auth_service, email_sender):
         session = await auth_service.signup(
             email="dana@example.com",
@@ -247,11 +266,13 @@ class TestLogin:
         assert isinstance(result, AuthenticatedSession)
         assert result.user.email == "dana@example.com"
 
-    async def test_technician_token_has_read_only_client_permission(
+    async def test_technician_token_has_read_only_client_and_job_permissions(
         self, auth_service, all_services
     ):
-        """client-service Decision 3: TECHNICIAN gets CLIENTS_READ but
-        never CLIENTS_WRITE, unlike OWNER/DISPATCHER."""
+        """client-service Decision 3 / job-service's own Create Job
+        contract: TECHNICIAN gets CLIENTS_READ and JOBS_READ but never
+        CLIENTS_WRITE or JOBS_WRITE, unlike OWNER/DISPATCHER — a technician
+        can see jobs but not create them."""
         owner_session = await auth_service.signup(
             email="owner@example.com",
             password="hunter2",
@@ -273,6 +294,8 @@ class TestLogin:
         )
         assert Permission.CLIENTS_READ in claims.permissions
         assert Permission.CLIENTS_WRITE not in claims.permissions
+        assert Permission.JOBS_READ in claims.permissions
+        assert Permission.JOBS_WRITE not in claims.permissions
 
     async def test_wrong_password_raises_invalid_credentials(self, auth_service):
         await auth_service.signup(
