@@ -1,11 +1,12 @@
 """
 tests/unit/api/v1/test_jobs.py
 
-Composition tests for POST /v1/jobs -- the first point authentication,
-tenant derivation, authorization, downstream credential propagation,
-Client Service validation, snapshot construction, persistence, and
-RFC 9457 error translation all run together as one real request path,
-not as independently mocked units.
+Composition tests for the /v1/jobs HTTP surface.
+
+These tests are the point where authentication, tenant derivation,
+authorization, service orchestration, persistence, response mapping,
+and RFC 9457 error translation run together as real request paths,
+rather than as independently mocked units.
 
 Two real pieces are assembled per test, matching the actual dependency
 graph rather than re-mocking job-service's own already-tested
@@ -51,6 +52,7 @@ from jwt.exceptions import PyJWKClientError
 from app.api.dependencies import ServiceRegistry
 from app.core.config import Settings
 from app.main import create_app
+from app.models.job import Job, JobStatus, SiteAddressSnapshot
 from app.repositories.in_memory.job_repository import InMemoryJobRepository
 from app.services.client_service_client import ClientServiceClient
 from app.services.job_service import JobService
@@ -175,6 +177,42 @@ def _valid_request_body(
         "title": "Annual boiler service",
         "description": "Client reports intermittent pilot light failure.",
     }
+
+
+def _make_job(tenant_id: UUID | None = None, **overrides: Any) -> Job:
+    """For seeding the repository directly in Query Operations tests
+    -- these routes are read-only, so there's no reason to route every
+    test through a full POST /v1/jobs composition just to get a Job to
+    read back. **overrides lets a test set e.g. status=JobStatus.CANCELLED
+    or client_id=some_specific_id after construction, matching the same
+    direct-attribute-assignment pattern already used in
+    test_in_memory_job_repository.py and test_job_service.py."""
+    job = Job.create(
+        tenant_id=tenant_id or uuid4(),
+        client_id=uuid4(),
+        client_name_snapshot="Birmingham Plumbing Co.",
+        site_id=uuid4(),
+        site_label_snapshot="Main Warehouse",
+        site_address_snapshot=SiteAddressSnapshot(
+            line1="14 Colmore Row", city="Birmingham", postcode="B3 2QD"
+        ),
+        title="Annual boiler service",
+    )
+    for key, value in overrides.items():
+        setattr(job, key, value)
+    return job
+
+
+def _unused_client_service_handler(request: httpx.Request) -> httpx.Response:
+    """Query Operations never call Client Service (03-api-contract.md:
+    all three GET routes require only jobs:read). Raising here, rather
+    than just not caring, makes any such fault fail loudly and
+    immediately rather than silently returning a plausible-looking
+    fake response that would mask the bug."""
+    raise AssertionError(
+        "Client Service was called during a Query Operations test -- "
+        "these routes should never make an outbound call."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -472,3 +510,359 @@ async def test_two_requests_share_the_same_repository(
             tenant_id=tenant_id, job_id=job_id
         )
         assert persisted is not None
+
+
+# ---------------------------------------------------------------------------
+# 5. Query Operations -- GET /v1/jobs/{job_id}
+# ---------------------------------------------------------------------------
+
+
+async def test_get_job_returns_full_job_when_it_exists(
+    keypair: ec.EllipticCurvePrivateKey,
+) -> None:
+    tenant_id = uuid4()
+    app, registry = _build_app(client_service_handler=_unused_client_service_handler)
+    job = _make_job(tenant_id)
+    await registry.job_repository.create(job)
+    token = _make_token(keypair, tenant_id=tenant_id, permissions=["jobs:read"])
+
+    with TestClient(app) as client:
+        response = client.get(
+            f"/v1/jobs/{job.id}", headers={"Authorization": f"Bearer {token}"}
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"] == str(job.id)
+    assert body["tenant_id"] == str(tenant_id)
+    assert body["status"] == "draft"
+    assert body["client_name_snapshot"] == "Birmingham Plumbing Co."
+    assert body["site_label_snapshot"] == "Main Warehouse"
+    assert body["visits"] == []
+
+
+async def test_get_job_returns_404_for_unknown_job_id(
+    keypair: ec.EllipticCurvePrivateKey,
+) -> None:
+    app, _ = _build_app(client_service_handler=_unused_client_service_handler)
+    token = _make_token(keypair, permissions=["jobs:read"])
+
+    with TestClient(app) as client:
+        response = client.get(
+            f"/v1/jobs/{uuid4()}", headers={"Authorization": f"Bearer {token}"}
+        )
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "job_not_found"
+
+
+async def test_get_job_returns_404_for_job_belonging_to_a_different_tenant(
+    keypair: ec.EllipticCurvePrivateKey,
+) -> None:
+    """Tenant non-disclosure: a genuinely-existing Job under a
+    different tenant must be indistinguishable from one that doesn't
+    exist at all -- same status code, same code value, no signal that
+    anything exists there."""
+    app, registry = _build_app(client_service_handler=_unused_client_service_handler)
+    job = _make_job(uuid4())
+    await registry.job_repository.create(job)
+    token = _make_token(keypair, tenant_id=uuid4(), permissions=["jobs:read"])
+
+    with TestClient(app) as client:
+        response = client.get(
+            f"/v1/jobs/{job.id}", headers={"Authorization": f"Bearer {token}"}
+        )
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "job_not_found"
+
+
+async def test_get_job_requires_authentication(
+    keypair: ec.EllipticCurvePrivateKey,
+) -> None:
+    app, _ = _build_app(client_service_handler=_unused_client_service_handler)
+
+    with TestClient(app) as client:
+        response = client.get(f"/v1/jobs/{uuid4()}")
+
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == "Bearer"
+
+
+async def test_get_job_requires_jobs_read_permission(
+    keypair: ec.EllipticCurvePrivateKey,
+) -> None:
+    app, _ = _build_app(client_service_handler=_unused_client_service_handler)
+    token = _make_token(keypair, permissions=["jobs:write"])  # missing jobs:read
+
+    with TestClient(app) as client:
+        response = client.get(
+            f"/v1/jobs/{uuid4()}", headers={"Authorization": f"Bearer {token}"}
+        )
+
+    assert response.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# 6. Query Operations -- GET /v1/jobs (list)
+# ---------------------------------------------------------------------------
+
+
+async def test_list_jobs_returns_the_paginated_envelope(
+    keypair: ec.EllipticCurvePrivateKey,
+) -> None:
+    tenant_id = uuid4()
+    app, registry = _build_app(client_service_handler=_unused_client_service_handler)
+    job = _make_job(tenant_id)
+    await registry.job_repository.create(job)
+    token = _make_token(keypair, tenant_id=tenant_id, permissions=["jobs:read"])
+
+    with TestClient(app) as client:
+        response = client.get("/v1/jobs", headers={"Authorization": f"Bearer {token}"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 1
+    assert body["limit"] == 20
+    assert body["offset"] == 0
+    assert len(body["items"]) == 1
+    item = body["items"][0]
+    assert item["id"] == str(job.id)
+    assert item["client_name_snapshot"] == "Birmingham Plumbing Co."
+    assert item["site_label_snapshot"] == "Main Warehouse"
+    assert item["visit_count"] == 0
+    assert "visits" not in item  # summary shape, not the nested detail shape
+
+
+async def test_list_jobs_only_returns_the_callers_tenant(
+    keypair: ec.EllipticCurvePrivateKey,
+) -> None:
+    tenant_a = uuid4()
+    tenant_b = uuid4()
+    app, registry = _build_app(client_service_handler=_unused_client_service_handler)
+    job_a = _make_job(tenant_a)
+    job_b = _make_job(tenant_b)
+    await registry.job_repository.create(job_a)
+    await registry.job_repository.create(job_b)
+    token = _make_token(keypair, tenant_id=tenant_a, permissions=["jobs:read"])
+
+    with TestClient(app) as client:
+        response = client.get("/v1/jobs", headers={"Authorization": f"Bearer {token}"})
+
+    body = response.json()
+    assert body["total"] == 1
+    assert [item["id"] for item in body["items"]] == [str(job_a.id)]
+
+
+async def test_list_jobs_filters_by_status(keypair: ec.EllipticCurvePrivateKey) -> None:
+    tenant_id = uuid4()
+    app, registry = _build_app(client_service_handler=_unused_client_service_handler)
+    draft_job = _make_job(tenant_id)
+    cancelled_job = _make_job(tenant_id, status=JobStatus.CANCELLED)
+    await registry.job_repository.create(draft_job)
+    await registry.job_repository.create(cancelled_job)
+    token = _make_token(keypair, tenant_id=tenant_id, permissions=["jobs:read"])
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/v1/jobs",
+            params={"status": "draft"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    body = response.json()
+    assert body["total"] == 1
+    assert [item["id"] for item in body["items"]] == [str(draft_job.id)]
+
+
+async def test_list_jobs_filters_by_client_id(
+    keypair: ec.EllipticCurvePrivateKey,
+) -> None:
+    tenant_id = uuid4()
+    target_client_id = uuid4()
+    app, registry = _build_app(client_service_handler=_unused_client_service_handler)
+    matching_job = _make_job(tenant_id, client_id=target_client_id)
+    other_job = _make_job(tenant_id)
+    await registry.job_repository.create(matching_job)
+    await registry.job_repository.create(other_job)
+    token = _make_token(keypair, tenant_id=tenant_id, permissions=["jobs:read"])
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/v1/jobs",
+            params={"client_id": str(target_client_id)},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    body = response.json()
+    assert body["total"] == 1
+    assert [item["id"] for item in body["items"]] == [str(matching_job.id)]
+
+
+async def test_list_jobs_clamps_limit_above_the_maximum(
+    keypair: ec.EllipticCurvePrivateKey,
+) -> None:
+    """500 is a well-formed request for more than this API is willing
+    to return in one page -- clamped to 100, not rejected
+    (03-api-contract.md: "default 20, max 100, clamped")."""
+    app, _ = _build_app(client_service_handler=_unused_client_service_handler)
+    token = _make_token(keypair, permissions=["jobs:read"])
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/v1/jobs",
+            params={"limit": 500},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["limit"] == 100
+
+
+async def test_list_jobs_rejects_non_positive_limit(
+    keypair: ec.EllipticCurvePrivateKey,
+) -> None:
+    """A limit of 0 (or negative) is a malformed request -- 422, a
+    different kind of problem than "too high" (which clamps)."""
+    app, _ = _build_app(client_service_handler=_unused_client_service_handler)
+    token = _make_token(keypair, permissions=["jobs:read"])
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/v1/jobs",
+            params={"limit": 0},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 422
+
+
+async def test_list_jobs_applies_limit_and_offset(
+    keypair: ec.EllipticCurvePrivateKey,
+) -> None:
+    """Proves the full HTTP chain -- FastAPI query parsing -> route ->
+    service -> repository -> envelope -- actually honors a non-default
+    offset, not just that the default (offset=0) happens to work.
+    Repository-level pagination is already thoroughly proven in
+    test_in_memory_job_repository.py; this test is specifically about
+    HTTP composition, not re-proving that logic."""
+    tenant_id = uuid4()
+    app, registry = _build_app(client_service_handler=_unused_client_service_handler)
+    first = _make_job(tenant_id)
+    second = _make_job(tenant_id)
+    await registry.job_repository.create(first)
+    await registry.job_repository.create(second)
+    token = _make_token(keypair, tenant_id=tenant_id, permissions=["jobs:read"])
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/v1/jobs",
+            params={"limit": 1, "offset": 1},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 2
+    assert body["limit"] == 1
+    assert body["offset"] == 1
+    assert len(body["items"]) == 1
+    assert body["items"][0]["id"] == str(second.id)
+
+
+async def test_list_jobs_requires_jobs_read_permission(
+    keypair: ec.EllipticCurvePrivateKey,
+) -> None:
+    app, _ = _build_app(client_service_handler=_unused_client_service_handler)
+    token = _make_token(keypair, permissions=["jobs:write"])  # missing jobs:read
+
+    with TestClient(app) as client:
+        response = client.get("/v1/jobs", headers={"Authorization": f"Bearer {token}"})
+
+    assert response.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# 7. Query Operations -- GET /v1/jobs/{job_id}/visits/{visit_id}
+# ---------------------------------------------------------------------------
+
+
+async def test_get_visit_returns_job_not_found_for_unknown_job_id(
+    keypair: ec.EllipticCurvePrivateKey,
+) -> None:
+    app, _ = _build_app(client_service_handler=_unused_client_service_handler)
+    token = _make_token(keypair, permissions=["jobs:read"])
+
+    with TestClient(app) as client:
+        response = client.get(
+            f"/v1/jobs/{uuid4()}/visits/{uuid4()}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "job_not_found"
+
+
+async def test_get_visit_returns_visit_not_found_when_job_exists_but_visit_does_not(
+    keypair: ec.EllipticCurvePrivateKey,
+) -> None:
+    """The one reachable outcome today: every real Job's visits list
+    is empty until Phase 2, so this is genuinely correct behavior for
+    any visit_id against an otherwise-valid Job -- not a stand-in for
+    an untested success case. The positive-retrieval test lands in
+    Phase 2 once Visits become constructible."""
+    tenant_id = uuid4()
+    app, registry = _build_app(client_service_handler=_unused_client_service_handler)
+    job = _make_job(tenant_id)
+    await registry.job_repository.create(job)
+    token = _make_token(keypair, tenant_id=tenant_id, permissions=["jobs:read"])
+
+    with TestClient(app) as client:
+        response = client.get(
+            f"/v1/jobs/{job.id}/visits/{uuid4()}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "visit_not_found"
+
+
+async def test_get_visit_returns_job_not_found_for_job_belonging_to_a_different_tenant(
+    keypair: ec.EllipticCurvePrivateKey,
+) -> None:
+    """Cross-tenant nested-Visit lookup must produce job_not_found,
+    NOT visit_not_found -- returning visit_not_found here would
+    indirectly reveal that the Job itself exists under a different
+    tenant, undermining the non-disclosure property already enforced
+    on GET /v1/jobs/{job_id}. Tenant scoping must hold at every level
+    of this nested lookup, not just the outer one."""
+    tenant_a = uuid4()
+    tenant_b = uuid4()
+    app, registry = _build_app(client_service_handler=_unused_client_service_handler)
+    job = _make_job(tenant_a)
+    await registry.job_repository.create(job)
+    token = _make_token(keypair, tenant_id=tenant_b, permissions=["jobs:read"])
+
+    with TestClient(app) as client:
+        response = client.get(
+            f"/v1/jobs/{job.id}/visits/{uuid4()}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "job_not_found"
+
+
+async def test_get_visit_requires_jobs_read_permission(
+    keypair: ec.EllipticCurvePrivateKey,
+) -> None:
+    app, _ = _build_app(client_service_handler=_unused_client_service_handler)
+    token = _make_token(keypair, permissions=["jobs:write"])  # missing jobs:read
+
+    with TestClient(app) as client:
+        response = client.get(
+            f"/v1/jobs/{uuid4()}/visits/{uuid4()}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 403

@@ -1,14 +1,24 @@
 """
 app/exceptions/job.py
 
-Five exceptions. ClientNotFoundError/ServiceUnavailableError are owned
+Seven exceptions. ClientNotFoundError/ServiceUnavailableError are owned
 by ClientServiceClient's own error translation (built earlier).
 ClientArchivedError/SiteNotFoundError/ContactNotFoundError are owned
 by JobService.validate_client_reference() -- per 01-create-job.md's
 sequence diagram, these come from inspecting the already-fetched
 client's status/sites/contacts locally, not a further network call.
 
-JobNotFoundError still waits for the GET-by-ID checkpoint.
+JobNotFoundError and VisitNotFoundError land here for the Query
+Operations checkpoint -- genuinely distinct codes (job_not_found vs.
+visit_not_found), confirmed against 03-api-contract.md's own Future
+Documentation section, which lists both separately among the
+contract's error codes rather than collapsing them into one.
+
+JobNotFoundError's detail message is deliberately generic -- it never
+distinguishes "doesn't exist" from "belongs to a different tenant"
+(03-api-contract.md: "identical response whether not found or belongs
+to a different tenant"), matching ClientNotFoundError's own established
+wording pattern above.
 """
 
 from __future__ import annotations
@@ -67,3 +77,21 @@ class ContactNotFoundError(DomainError):
         super().__init__(
             detail=f"No contact exists with ID {contact_id} under this client."
         )
+
+
+class JobNotFoundError(DomainError):
+    status_code = status.HTTP_404_NOT_FOUND
+    title = "Job not found"
+    code = "job_not_found"
+
+    def __init__(self, job_id: UUID) -> None:
+        super().__init__(detail=f"No job exists with ID {job_id}.")
+
+
+class VisitNotFoundError(DomainError):
+    status_code = status.HTTP_404_NOT_FOUND
+    title = "Visit not found"
+    code = "visit_not_found"
+
+    def __init__(self, visit_id: UUID) -> None:
+        super().__init__(detail=f"No visit exists with ID {visit_id} under this job.")

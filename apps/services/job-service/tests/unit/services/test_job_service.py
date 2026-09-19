@@ -22,10 +22,14 @@ from app.exceptions.job import (
     ClientArchivedError,
     ClientNotFoundError,
     ContactNotFoundError,
+    JobNotFoundError,
     ServiceUnavailableError,
     SiteNotFoundError,
+    VisitNotFoundError,
 )
+from app.models.job import Job, JobStatus, SiteAddressSnapshot
 from app.repositories.in_memory.job_repository import InMemoryJobRepository
+from app.repositories.job_repository import JobPage
 from app.services.client_service_client import (
     ClientContactResponse,
     ClientServiceResponse,
@@ -257,4 +261,148 @@ async def test_create_job_rejects_unknown_contact() -> None:
             contact_id=uuid4(),  # does not match client_response's one contact
             title="Test job",
             description=None,
+        )
+
+
+# ---------------------------------------------------------------------------
+# get_job() / list_jobs() / get_visit() -- Query Operations checkpoint
+# ---------------------------------------------------------------------------
+
+
+def _make_job(tenant_id: UUID | None = None) -> Job:
+    return Job.create(
+        tenant_id=tenant_id or uuid4(),
+        client_id=uuid4(),
+        client_name_snapshot="Birmingham Plumbing Co.",
+        site_id=uuid4(),
+        site_label_snapshot="Main Warehouse",
+        site_address_snapshot=SiteAddressSnapshot(
+            line1="14 Colmore Row", city="Birmingham", postcode="B3 2QD"
+        ),
+        title="Annual boiler service",
+    )
+
+
+async def test_get_job_returns_the_job_when_it_exists() -> None:
+    repository = InMemoryJobRepository()
+    service = JobService(_FakeClientServiceClient(), repository)
+    job = _make_job()
+    await repository.create(job)
+
+    fetched = await service.get_job(tenant_id=job.tenant_id, job_id=job.id)
+
+    assert fetched.id == job.id
+
+
+async def test_get_job_raises_not_found_for_unknown_job_id() -> None:
+    service = JobService(_FakeClientServiceClient(), InMemoryJobRepository())
+
+    with pytest.raises(JobNotFoundError):
+        await service.get_job(tenant_id=uuid4(), job_id=uuid4())
+
+
+async def test_get_job_raises_not_found_for_wrong_tenant() -> None:
+    """Matches the repository's own established isolation guarantee --
+    a job_id existing under a different tenant is indistinguishable
+    from one that doesn't exist at all."""
+    repository = InMemoryJobRepository()
+    service = JobService(_FakeClientServiceClient(), repository)
+    job = _make_job()
+    await repository.create(job)
+
+    with pytest.raises(JobNotFoundError):
+        await service.get_job(tenant_id=uuid4(), job_id=job.id)
+
+
+class _RecordingJobRepository:
+    """Records every call to list_by_tenant() and returns a canned
+    JobPage -- proves JobService.list_jobs() forwards every argument
+    unchanged, which the previous version of this test (using the real
+    InMemoryJobRepository and only checking the returned page's shape)
+    did not actually prove: a service implementation that reached into
+    some other repository behavior could have satisfied that
+    assertion just as easily."""
+
+    def __init__(self, page: JobPage) -> None:
+        self.page = page
+        self.list_calls: list[dict[str, object]] = []
+
+    async def list_by_tenant(
+        self,
+        *,
+        tenant_id: UUID,
+        status: JobStatus | None = None,
+        client_id: UUID | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> JobPage:
+        self.list_calls.append(
+            {
+                "tenant_id": tenant_id,
+                "status": status,
+                "client_id": client_id,
+                "limit": limit,
+                "offset": offset,
+            }
+        )
+        return self.page
+
+    async def create(self, job: Job) -> None:
+        raise NotImplementedError("not exercised by this fake")
+
+    async def get(self, tenant_id: UUID, job_id: UUID) -> Job | None:
+        raise NotImplementedError("not exercised by this fake")
+
+
+async def test_list_jobs_forwards_every_argument_unchanged_to_the_repository() -> None:
+    tenant_id = uuid4()
+    client_id = uuid4()
+    expected_page = JobPage(items=[], total=0)
+    repository = _RecordingJobRepository(expected_page)
+    service = JobService(_FakeClientServiceClient(), repository)
+
+    page = await service.list_jobs(
+        tenant_id=tenant_id,
+        status=JobStatus.CANCELLED,
+        client_id=client_id,
+        limit=37,
+        offset=11,
+    )
+
+    assert repository.list_calls == [
+        {
+            "tenant_id": tenant_id,
+            "status": JobStatus.CANCELLED,
+            "client_id": client_id,
+            "limit": 37,
+            "offset": 11,
+        }
+    ]
+    assert page is expected_page
+
+
+async def test_get_visit_raises_job_not_found_for_unknown_job_id() -> None:
+    service = JobService(_FakeClientServiceClient(), InMemoryJobRepository())
+
+    with pytest.raises(JobNotFoundError):
+        await service.get_visit(tenant_id=uuid4(), job_id=uuid4(), visit_id=uuid4())
+
+
+async def test_get_visit_raises_visit_not_found_when_job_exists_but_visit_does_not() -> (
+    None
+):
+    """The one deliberate boundary this checkpoint stops at: every
+    real Job's visits list is empty until Phase 2 lifts Job.visits'
+    empty-constraint, so this is the ONLY reachable outcome today for
+    an otherwise-valid Job -- genuinely correct behavior, not a stand-
+    in for an untested success case. The positive-retrieval test lands
+    in Phase 2 once Visits become constructible."""
+    repository = InMemoryJobRepository()
+    service = JobService(_FakeClientServiceClient(), repository)
+    job = _make_job()
+    await repository.create(job)
+
+    with pytest.raises(VisitNotFoundError):
+        await service.get_visit(
+            tenant_id=job.tenant_id, job_id=job.id, visit_id=uuid4()
         )

@@ -26,23 +26,54 @@ changed_by / sub is NOT extracted or threaded through -- Job.create()
 has no such parameter, and 03-api-contract.md's Create Job response
 has no created_by field (see app/models/job.py's own docstring for the
 full Decision 4 reasoning).
+
+Query Operations checkpoint (GET routes below) -- all three require
+jobs:read only, confirmed directly from 03-api-contract.md: unlike
+Create Job, no clients:read and no outbound Client Service call for
+any Query Operation.
+
+limit/offset validation mirrors client-service's own established
+pattern exactly: Query(ge=1)/Query(ge=0) REJECTS a malformed value
+(0, negative) with 422; a limit ABOVE the max is silently CLAMPED, not
+rejected -- two different kinds of problem, handled differently
+(03-api-contract.md: "default 20, max 100, clamped").
+
+get_visit()'s route returns VisitResponse, built via model_validate()
+against the plain dict get_visit() currently returns -- Visit isn't a
+real Pydantic domain model yet (Phase 2 introduces it), but the
+frozen contract already defines the full Visit response shape, so the
+schema is built now rather than weakened to a bare dict just because
+this path is currently unreachable (every real Job's visits list is
+empty until Phase 2). Phase 2 changes only the construction mechanism
+(a proper from_domain(visit: Visit) classmethod), not this schema's
+shape -- see app/api/schemas/job.py's VisitResponse docstring.
 """
 
 from __future__ import annotations
 
 from typing import Annotated
+from uuid import UUID
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 
 from app.api.auth_dependency import get_access_token
 from app.api.dependencies import get_job_service
 from app.api.permission_dependency import require_permission
-from app.api.schemas.job import CreateJobRequest, JobResponse
-from app.constants.permissions import CLIENTS_READ, JOBS_WRITE
+from app.api.schemas.job import (
+    CreateJobRequest,
+    JobListItemResponse,
+    JobListResponse,
+    JobResponse,
+    VisitResponse,
+)
+from app.constants.permissions import CLIENTS_READ, JOBS_READ, JOBS_WRITE
+from app.models.job import JobStatus
 from app.security.token_verifier import AccessTokenClaims
 from app.services.job_service import JobService
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
+
+_MAX_LIMIT = 100
 
 
 @router.post("", status_code=201)
@@ -65,3 +96,53 @@ async def create_job(
         description=body.description,
     )
     return JobResponse.from_domain(job)
+
+
+@router.get("")
+async def list_jobs(
+    claims: Annotated[AccessTokenClaims, Depends(require_permission(JOBS_READ))],
+    job_service: Annotated[JobService, Depends(get_job_service)],
+    status: JobStatus | None = None,
+    client_id: UUID | None = None,
+    limit: int = Query(default=20, ge=1),
+    offset: int = Query(default=0, ge=0),
+) -> JobListResponse:
+    clamped_limit = min(limit, _MAX_LIMIT)
+
+    page = await job_service.list_jobs(
+        tenant_id=claims.tenant_id,
+        status=status,
+        client_id=client_id,
+        limit=clamped_limit,
+        offset=offset,
+    )
+
+    return JobListResponse(
+        items=[JobListItemResponse.from_domain(job) for job in page.items],
+        total=page.total,
+        limit=clamped_limit,
+        offset=offset,
+    )
+
+
+@router.get("/{job_id}")
+async def get_job(
+    job_id: UUID,
+    claims: Annotated[AccessTokenClaims, Depends(require_permission(JOBS_READ))],
+    job_service: Annotated[JobService, Depends(get_job_service)],
+) -> JobResponse:
+    job = await job_service.get_job(tenant_id=claims.tenant_id, job_id=job_id)
+    return JobResponse.from_domain(job)
+
+
+@router.get("/{job_id}/visits/{visit_id}")
+async def get_visit(
+    job_id: UUID,
+    visit_id: UUID,
+    claims: Annotated[AccessTokenClaims, Depends(require_permission(JOBS_READ))],
+    job_service: Annotated[JobService, Depends(get_job_service)],
+) -> VisitResponse:
+    visit = await job_service.get_visit(
+        tenant_id=claims.tenant_id, job_id=job_id, visit_id=visit_id
+    )
+    return VisitResponse.model_validate(visit)
