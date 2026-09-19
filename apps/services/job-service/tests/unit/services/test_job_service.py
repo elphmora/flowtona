@@ -391,15 +391,46 @@ async def test_get_visit_raises_job_not_found_for_unknown_job_id() -> None:
 async def test_get_visit_raises_visit_not_found_when_job_exists_but_visit_does_not() -> (
     None
 ):
-    """The one deliberate boundary this checkpoint stops at: every
-    real Job's visits list is empty until Phase 2 lifts Job.visits'
-    empty-constraint, so this is the ONLY reachable outcome today for
-    an otherwise-valid Job -- genuinely correct behavior, not a stand-
-    in for an untested success case. The positive-retrieval test lands
-    in Phase 2 once Visits become constructible."""
+    """Job exists and is otherwise valid, but no Visit has been added
+    to it -- distinct from the positive-retrieval and
+    other-visits-exist cases below, both of which are only
+    exercisable now that Phase 2 gives Visit a real domain model."""
     repository = InMemoryJobRepository()
     service = JobService(_FakeClientServiceClient(), repository)
     job = _make_job()
+    await repository.create(job)
+
+    with pytest.raises(VisitNotFoundError):
+        await service.get_visit(
+            tenant_id=job.tenant_id, job_id=job.id, visit_id=uuid4()
+        )
+
+
+async def test_get_visit_returns_the_visit_once_one_exists() -> None:
+    """The positive-retrieval case this checkpoint explicitly deferred:
+    every real Job's visits list was empty until Phase 2 gave Visit a
+    real domain model. This closes that recorded gap."""
+    repository = InMemoryJobRepository()
+    service = JobService(_FakeClientServiceClient(), repository)
+    job = _make_job()
+    visit = job.add_visit()
+    await repository.create(job)
+
+    found = await service.get_visit(
+        tenant_id=job.tenant_id, job_id=job.id, visit_id=visit.id
+    )
+
+    assert found == visit
+
+
+async def test_get_visit_raises_visit_not_found_when_other_visits_exist() -> None:
+    """Distinct from the empty-list case above: proves the lookup
+    genuinely searches by ID rather than effectively implementing "any
+    Visit means success"."""
+    repository = InMemoryJobRepository()
+    service = JobService(_FakeClientServiceClient(), repository)
+    job = _make_job()
+    job.add_visit()
     await repository.create(job)
 
     with pytest.raises(VisitNotFoundError):
