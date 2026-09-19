@@ -19,6 +19,14 @@ distinguishes "doesn't exist" from "belongs to a different tenant"
 (03-api-contract.md: "identical response whether not found or belongs
 to a different tenant"), matching ClientNotFoundError's own established
 wording pattern above.
+
+JobTerminalError is Phase 2's addition (PR 1): raised when a business
+command -- currently just Create Visit -- targets a Job whose status is
+COMPLETED or CANCELLED. 409 Conflict: the Job exists, the request is
+otherwise well-formed, but it conflicts with the aggregate's current
+state. It belongs here rather than as a repository-specific error
+because the invariant it protects is a domain rule (Job.add_visit()),
+not a persistence concern.
 """
 
 from __future__ import annotations
@@ -95,3 +103,14 @@ class VisitNotFoundError(DomainError):
 
     def __init__(self, visit_id: UUID) -> None:
         super().__init__(detail=f"No visit exists with ID {visit_id} under this job.")
+
+
+class JobTerminalError(DomainError):
+    status_code = status.HTTP_409_CONFLICT
+    title = "Job is in a terminal state"
+    code = "job_terminal"
+
+    def __init__(self, job_id: UUID) -> None:
+        super().__init__(
+            detail=f"Job {job_id} is completed or cancelled and cannot be modified."
+        )

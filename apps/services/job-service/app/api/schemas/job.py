@@ -3,6 +3,7 @@ app/api/schemas/job.py
 
 Request/response schemas for Job Service's Job API, per
 03-api-contract.md.
+
 tenant_id is NEVER accepted in the request schema (Platform
 Conventions §5) -- CreateJobRequest uses ConfigDict(extra="forbid") so
 a client-supplied tenant_id, or any other undeclared field, is
@@ -19,34 +20,25 @@ RequestValidationError, which only covers FastAPI's own request
 parsing), and fall through to the generic 500 handler instead of the
 documented 422 validation_failed.
 
-JobResponse.visits -- corrected during review. list[dict[str, object]]
-alone was flagged as an API contract weaker than both the domain and
-the eventual intent: even constrained to empty at runtime, the type
-itself presents to any API consumer (via generated OpenAPI docs) as
-"array of arbitrary objects," with no signal that this is a deliberate
-Phase 1 limitation rather than a genuinely open-ended field. Rejected
-alternatives: list[Never] (same "untested exotic Pydantic construct"
-risk already rejected once for the domain model itself) and
-Literal[[]] (invalid -- lists aren't hashable, so Literal can't express
-this). The fix: keep the same boring, certain-to-work type, but make
-the limitation explicit and OpenAPI-visible via Field(description=...),
-plus the same empty-constraint field_validator Job's own domain model
-already has -- defense-in-depth, not solely relying on the upstream
-guarantee that job.visits is already empty by the time this runs.
+JobResponse.visits -- Phase 2 update: now list[VisitResponse], built
+via VisitResponse.from_domain() over the aggregate's real Visit
+objects. Through Phase 1 this was list[dict[str, object]] with an
+empty-only validator, recorded then as an explicit acceptance item
+("the moment Phase 2 introduces a real Visit domain model, this field
+MUST change to list[VisitResponse] and _visits_must_be_empty MUST be
+removed"). That moment is now -- the validator is gone along with the
+placeholder type.
 
-EXPLICIT PHASE 2 ACCEPTANCE ITEM, recorded here so it cannot quietly
-disappear: JobResponse.visits stays list[dict[str, object]], with
-_visits_must_be_empty still enforcing emptiness, ONLY because Phase 1
-genuinely prohibits a non-empty Job.visits. The moment Phase 2
-introduces a real Visit domain model, this field MUST change to
-list[VisitResponse] and _visits_must_be_empty MUST be removed --
-leaving it as-is at that point would misrepresent what the domain
-actually supports, not merely describe a current limitation.
+VisitResponse is defined before JobResponse so JobResponse's field
+declaration and from_domain() translation refer directly to an
+already-defined response schema rather than relying unnecessarily on
+forward-reference resolution.
 
-JobResponse is a distinct class from app.models.job.Job even though
-both are Pydantic -- matching the established platform-wide
-convention of never reusing a domain model as an API schema directly.
-from_domain() is the one translation point.
+JobResponse and VisitResponse remain distinct from their corresponding
+domain models even though both sides use Pydantic -- matching the
+established platform-wide convention of never exposing a domain model
+as an API schema directly. from_domain() methods are the explicit
+translation boundary.
 """
 
 from __future__ import annotations
@@ -56,7 +48,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app.models.job import Job
+from app.models.job import Job, Visit
 
 
 class CreateJobRequest(BaseModel):
@@ -84,6 +76,45 @@ class SiteAddressSnapshotResponse(BaseModel):
     country: str | None
 
 
+class VisitResponse(BaseModel):
+    """Full Visit representation defined by 03-api-contract.md.
+
+    Translates from the Visit domain model through from_domain(),
+    preserving the domain/API boundary used by JobResponse. The same
+    response shape is reused by Visit query and command endpoints.
+    """
+
+    id: UUID
+    job_id: UUID
+    status: str
+    scheduled_start: datetime | None
+    scheduled_end: datetime | None
+    actual_start: datetime | None
+    actual_end: datetime | None
+    assigned_member_id: UUID | None
+    outcome_code: str | None
+    completion_notes: str | None
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def from_domain(cls, visit: Visit) -> VisitResponse:
+        return cls(
+            id=visit.id,
+            job_id=visit.job_id,
+            status=visit.status,
+            scheduled_start=visit.scheduled_start,
+            scheduled_end=visit.scheduled_end,
+            actual_start=visit.actual_start,
+            actual_end=visit.actual_end,
+            assigned_member_id=visit.assigned_member_id,
+            outcome_code=visit.outcome_code,
+            completion_notes=visit.completion_notes,
+            created_at=visit.created_at,
+            updated_at=visit.updated_at,
+        )
+
+
 class JobResponse(BaseModel):
     id: UUID
     tenant_id: UUID
@@ -104,28 +135,10 @@ class JobResponse(BaseModel):
     contact_email_snapshot: str | None
     contact_phone_snapshot: str | None
 
-    visits: list[dict[str, object]] = Field(
-        default_factory=list,
-        description=(
-            "Always empty in Phase 1 -- Visit behavior is deliberately "
-            "deferred from the Create Job slice. This field exists to "
-            'match the frozen 03-api-contract.md response shape ("visits": '
-            "[]) and will gain a real VisitResponse element type when "
-            "Visit is implemented."
-        ),
-    )
+    visits: list[VisitResponse] = Field(default_factory=list)
 
     created_at: datetime
     updated_at: datetime
-
-    @field_validator("visits")
-    @classmethod
-    def _visits_must_be_empty(
-        cls, value: list[dict[str, object]]
-    ) -> list[dict[str, object]]:
-        if value:
-            raise ValueError("visits must be empty in Phase 1")
-        return value
 
     @classmethod
     def from_domain(cls, job: Job) -> JobResponse:
@@ -151,7 +164,7 @@ class JobResponse(BaseModel):
             contact_name_snapshot=job.contact_name_snapshot,
             contact_email_snapshot=job.contact_email_snapshot,
             contact_phone_snapshot=job.contact_phone_snapshot,
-            visits=job.visits,
+            visits=[VisitResponse.from_domain(visit) for visit in job.visits],
             created_at=job.created_at,
             updated_at=job.updated_at,
         )
@@ -159,11 +172,14 @@ class JobResponse(BaseModel):
 
 class JobListItemResponse(BaseModel):
     """Summary shape for GET /v1/jobs -- confirmed directly from
-    03-api-contract.md's example response. visit_count, not a nested
-    visits array -- list payload weight shouldn't scale with per-Job
-    Visit counts (mirroring client-service Decision 6's list/detail
-    split). visit_count is computed here (len(job.visits)), never
-    stored -- there's no persisted counter to keep in sync."""
+    03-api-contract.md's example response.
+
+    visit_count, not a nested visits array -- list payload weight
+    shouldn't scale with per-Job Visit counts (mirroring
+    client-service Decision 6's list/detail split). visit_count is
+    computed here (len(job.visits)), never stored -- there's no
+    persisted counter to keep in sync.
+    """
 
     id: UUID
     status: str
@@ -191,43 +207,13 @@ class JobListItemResponse(BaseModel):
 
 
 class JobListResponse(BaseModel):
-    """Pagination envelope, matching client-service's own convention
-    exactly (items/total/limit/offset) -- confirmed directly from
-    03-api-contract.md's example response, not re-derived."""
+    """Pagination envelope matching client-service's convention.
+
+    The response shape is items/total/limit/offset, as confirmed by
+    03-api-contract.md's Query Operations contract.
+    """
 
     items: list[JobListItemResponse]
     total: int
     limit: int
     offset: int
-
-
-class VisitResponse(BaseModel):
-    """The full Visit representation -- confirmed directly from
-    03-api-contract.md's Create Visit response example, not
-    speculative. Built now, ahead of Phase 2's real Visit domain
-    model, deliberately: the frozen contract already defines this
-    shape, and the route being currently unreachable (every real Job's
-    visits list is empty until Phase 2) isn't a reason to weaken its
-    public API declaration to a bare dict.
-
-    Constructed via model_validate() against a plain dict today, since
-    Visit isn't a real domain model yet -- Phase 2 changes ONLY the
-    construction mechanism (a proper from_domain(visit: Visit)
-    classmethod, matching every other response schema's pattern), not
-    this schema's shape. This also means every future Visit command
-    endpoint (Schedule, Assign, Start, Complete, Cancel Visit) can
-    reuse this same class once built -- built once here, not
-    six times later."""
-
-    id: UUID
-    job_id: UUID
-    status: str
-    scheduled_start: datetime | None
-    scheduled_end: datetime | None
-    actual_start: datetime | None
-    actual_end: datetime | None
-    assigned_member_id: UUID | None
-    outcome_code: str | None
-    completion_notes: str | None
-    created_at: datetime
-    updated_at: datetime

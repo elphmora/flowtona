@@ -38,15 +38,11 @@ pattern exactly: Query(ge=1)/Query(ge=0) REJECTS a malformed value
 rejected -- two different kinds of problem, handled differently
 (03-api-contract.md: "default 20, max 100, clamped").
 
-get_visit()'s route returns VisitResponse, built via model_validate()
-against the plain dict get_visit() currently returns -- Visit isn't a
-real Pydantic domain model yet (Phase 2 introduces it), but the
-frozen contract already defines the full Visit response shape, so the
-schema is built now rather than weakened to a bare dict just because
-this path is currently unreachable (every real Job's visits list is
-empty until Phase 2). Phase 2 changes only the construction mechanism
-(a proper from_domain(visit: Visit) classmethod), not this schema's
-shape -- see app/api/schemas/job.py's VisitResponse docstring.
+Phase 2 introduces the real Visit domain model. get_visit() therefore
+translates the returned Visit explicitly through
+VisitResponse.from_domain(), preserving the domain/API boundary used
+by JobResponse. The response schema itself is unchanged from the
+frozen 03-api-contract.md shape established during Query Operations.
 """
 
 from __future__ import annotations
@@ -145,4 +141,4 @@ async def get_visit(
     visit = await job_service.get_visit(
         tenant_id=claims.tenant_id, job_id=job_id, visit_id=visit_id
     )
-    return VisitResponse.model_validate(visit)
+    return VisitResponse.from_domain(visit)
