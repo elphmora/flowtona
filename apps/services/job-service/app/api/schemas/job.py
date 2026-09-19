@@ -1,7 +1,8 @@
 """
 app/api/schemas/job.py
 
-Request/response schemas for POST /v1/jobs, per 03-api-contract.md.
+Request/response schemas for Job Service's Job API, per
+03-api-contract.md.
 tenant_id is NEVER accepted in the request schema (Platform
 Conventions §5) -- CreateJobRequest uses ConfigDict(extra="forbid") so
 a client-supplied tenant_id, or any other undeclared field, is
@@ -32,6 +33,15 @@ the limitation explicit and OpenAPI-visible via Field(description=...),
 plus the same empty-constraint field_validator Job's own domain model
 already has -- defense-in-depth, not solely relying on the upstream
 guarantee that job.visits is already empty by the time this runs.
+
+EXPLICIT PHASE 2 ACCEPTANCE ITEM, recorded here so it cannot quietly
+disappear: JobResponse.visits stays list[dict[str, object]], with
+_visits_must_be_empty still enforcing emptiness, ONLY because Phase 1
+genuinely prohibits a non-empty Job.visits. The moment Phase 2
+introduces a real Visit domain model, this field MUST change to
+list[VisitResponse] and _visits_must_be_empty MUST be removed --
+leaving it as-is at that point would misrepresent what the domain
+actually supports, not merely describe a current limitation.
 
 JobResponse is a distinct class from app.models.job.Job even though
 both are Pydantic -- matching the established platform-wide
@@ -145,3 +155,79 @@ class JobResponse(BaseModel):
             created_at=job.created_at,
             updated_at=job.updated_at,
         )
+
+
+class JobListItemResponse(BaseModel):
+    """Summary shape for GET /v1/jobs -- confirmed directly from
+    03-api-contract.md's example response. visit_count, not a nested
+    visits array -- list payload weight shouldn't scale with per-Job
+    Visit counts (mirroring client-service Decision 6's list/detail
+    split). visit_count is computed here (len(job.visits)), never
+    stored -- there's no persisted counter to keep in sync."""
+
+    id: UUID
+    status: str
+    title: str
+    client_id: UUID
+    client_name_snapshot: str
+    site_label_snapshot: str
+    visit_count: int
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def from_domain(cls, job: Job) -> JobListItemResponse:
+        return cls(
+            id=job.id,
+            status=job.status,
+            title=job.title,
+            client_id=job.client_id,
+            client_name_snapshot=job.client_name_snapshot,
+            site_label_snapshot=job.site_label_snapshot,
+            visit_count=len(job.visits),
+            created_at=job.created_at,
+            updated_at=job.updated_at,
+        )
+
+
+class JobListResponse(BaseModel):
+    """Pagination envelope, matching client-service's own convention
+    exactly (items/total/limit/offset) -- confirmed directly from
+    03-api-contract.md's example response, not re-derived."""
+
+    items: list[JobListItemResponse]
+    total: int
+    limit: int
+    offset: int
+
+
+class VisitResponse(BaseModel):
+    """The full Visit representation -- confirmed directly from
+    03-api-contract.md's Create Visit response example, not
+    speculative. Built now, ahead of Phase 2's real Visit domain
+    model, deliberately: the frozen contract already defines this
+    shape, and the route being currently unreachable (every real Job's
+    visits list is empty until Phase 2) isn't a reason to weaken its
+    public API declaration to a bare dict.
+
+    Constructed via model_validate() against a plain dict today, since
+    Visit isn't a real domain model yet -- Phase 2 changes ONLY the
+    construction mechanism (a proper from_domain(visit: Visit)
+    classmethod, matching every other response schema's pattern), not
+    this schema's shape. This also means every future Visit command
+    endpoint (Schedule, Assign, Start, Complete, Cancel Visit) can
+    reuse this same class once built -- built once here, not
+    six times later."""
+
+    id: UUID
+    job_id: UUID
+    status: str
+    scheduled_start: datetime | None
+    scheduled_end: datetime | None
+    actual_start: datetime | None
+    actual_end: datetime | None
+    assigned_member_id: UUID | None
+    outcome_code: str | None
+    completion_notes: str | None
+    created_at: datetime
+    updated_at: datetime

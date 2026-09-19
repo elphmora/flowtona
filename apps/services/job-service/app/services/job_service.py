@@ -5,13 +5,11 @@ JobService -- the application/orchestration service for Job's own
 business logic, matching client-service's established "entity service"
 pattern (ClientService/SiteService/ContactService, one per aggregate).
 
-Scope, precisely: permission checking (jobs:write, clients:read) is
-NOT here -- 01-create-job.md's diagram draws that as an API-layer
-self-call, happening before JobService.create_job() is ever invoked,
-not something this class does internally. There's also no JWT/auth
-dependency built yet to check permissions against. That lands in the
-next checkpoint, alongside the route itself. This class trusts its
-caller has already verified both permissions.
+Scope, precisely: permission checking (jobs:write, clients:read for
+Create Job; jobs:read for Query Operations) is NOT performed here.
+Authorization belongs to the API layer before JobService is invoked.
+This class therefore trusts its caller to have authenticated and
+authorized the request.
 
 ClientReader is a consumer-owned Protocol, not a dependency on the
 concrete ClientServiceClient adapter class -- matching JobRepository's
@@ -50,10 +48,12 @@ from uuid import UUID
 from app.exceptions.job import (
     ClientArchivedError,
     ContactNotFoundError,
+    JobNotFoundError,
     SiteNotFoundError,
+    VisitNotFoundError,
 )
-from app.models.job import Job, SiteAddressSnapshot
-from app.repositories.job_repository import JobRepository
+from app.models.job import Job, JobStatus, SiteAddressSnapshot
+from app.repositories.job_repository import JobPage, JobRepository
 from app.services.client_service_client import (
     ClientContactResponse,
     ClientServiceResponse,
@@ -121,11 +121,11 @@ class JobService:
         title: str,
         description: str | None,
     ) -> Job:
-        """The only command this checkpoint builds. ClientNotFoundError
-        and ServiceUnavailableError, if raised, come directly from
-        ClientReader.get_client() -- not caught and re-raised here,
-        since they're already the correct DomainError subclasses for
-        this situation."""
+        """Create a Job after resolving and validating its Client
+        reference. ClientNotFoundError and ServiceUnavailableError, if
+        raised, come directly from ClientReader.get_client() -- not
+        caught and re-raised here, since they're already the correct
+        DomainError subclasses for this situation."""
         client = await self._client_service_client.get_client(client_id, access_token)
 
         site, contact = self.validate_client_reference(client, site_id, contact_id)
@@ -153,3 +153,58 @@ class JobService:
 
         await self._job_repository.create(job)
         return job
+
+    async def get_job(self, *, tenant_id: UUID, job_id: UUID) -> Job:
+        """Query Operations checkpoint. Translates the repository's
+        plain None into JobNotFoundError -- the repository's contract
+        stays a boring lookup; domain meaning of "not found" lives
+        here, matching the same layering already established for
+        Create Job's own not-found translations."""
+        job = await self._job_repository.get(tenant_id, job_id)
+        if job is None:
+            raise JobNotFoundError(job_id)
+        return job
+
+    async def list_jobs(
+        self,
+        *,
+        tenant_id: UUID,
+        status: JobStatus | None = None,
+        client_id: UUID | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> JobPage:
+        """Thin passthrough -- JobPage is already the shape both the
+        route and this service want; no translation needed. limit/
+        offset are expected already-normalized by the API/schema layer
+        (default 20, max 100, clamped) before reaching here -- this
+        service does not itself enforce that policy, matching
+        client-service's own established repository/service boundary."""
+        return await self._job_repository.list_by_tenant(
+            tenant_id=tenant_id,
+            status=status,
+            client_id=client_id,
+            limit=limit,
+            offset=offset,
+        )
+
+    async def get_visit(
+        self, *, tenant_id: UUID, job_id: UUID, visit_id: UUID
+    ) -> dict[str, object]:
+        """Tenant-scoped Job lookup happens first, via get_job() --
+        raises JobNotFoundError exactly as that method already does.
+        Only once the Job itself resolves does the Visit lookup run.
+
+        Return type is dict[str, object], matching Job.visits' current
+        Phase 1 type -- Visit has no real domain model yet (Phase 2
+        introduces it). Because Job.visits is constrained to always be
+        empty until Phase 2 lifts that constraint, this method
+        currently raises VisitNotFoundError unconditionally for every
+        real Job -- a genuine, correctly-handled 404, not a stand-in
+        for an untested success path. The positive-retrieval case
+        becomes exercisable once Phase 2 exists."""
+        job = await self.get_job(tenant_id=tenant_id, job_id=job_id)
+        visit = next((v for v in job.visits if v.get("id") == visit_id), None)
+        if visit is None:
+            raise VisitNotFoundError(visit_id)
+        return visit
