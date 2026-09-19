@@ -1,17 +1,16 @@
 """
 app/models/job.py
 
-Job -- the aggregate root for job-service's Phase 1, scoped to exactly
-what Create Job needs.
+Job -- the aggregate root for job-service, extended in Phase 2 (PR 1)
+with the Visit child entity and the Create Visit domain command.
 
-visits is typed as list[dict[str, object]], constrained to empty by a
-field_validator, rather than list[Visit] -- Visit doesn't exist as a
-model yet, and Phase 1 provides no aggregate method capable of
-populating this list (Job.add_visit() arrives in Phase 2). The
-validator makes that invariant explicit rather than relying only on
-Job.create()'s signature omitting a visits parameter. When Phase 2
-gives Visit its real shape, this becomes list[Visit] and the validator
-is removed.
+visits was list[dict[str, object]], constrained to empty by a
+field_validator, through Phase 1 -- Visit didn't exist as a model yet,
+and Phase 1 provided no aggregate method capable of populating this
+list. Now that Visit has its real shape and Job.add_visit() exists,
+visits is list[Visit] and the empty-visits validator is removed: an
+empty list is still the natural starting value (default_factory=list),
+it's just no longer an enforced invariant.
 
 status_history and created_by/changed_by are deliberately absent:
 03-api-contract.md's Create Job response has neither field, and
@@ -27,6 +26,22 @@ title's non-blank validation is a single inline field_validator, not a
 shared NonBlankStr type -- extracting one for a single field, ahead of
 a second field/model actually needing the same rule, would be building
 shared infrastructure ahead of a concrete second use.
+
+Visit's field set mirrors the already-frozen Visit response shape:
+scheduling fields, actual timing fields, assigned_member_id, the
+outcome pair (outcome_code/completion_notes), and timestamps. Only
+DRAFT is ever produced by add_visit() -- the remaining VisitStatus
+values exist because the API contract and metrics surface already name
+them; later PRs add the transitions that reach them.
+
+Job.add_visit() takes no arguments and always produces a bare draft
+Visit -- Create Visit's request body is {} per the frozen command
+contract. Scheduling and assignment are separate, later commands; they
+must not be smuggled into this constructor. The terminal-state
+invariant (no new Visits once a Job is COMPLETED or CANCELLED) lives
+here, on the aggregate, rather than in JobService, so nothing can
+construct an invalid Visit-on-terminal-Job state by calling
+add_visit() directly.
 """
 
 from __future__ import annotations
@@ -37,11 +52,28 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.exceptions.job import JobTerminalError
+
 
 class JobStatus(StrEnum):
     """Full vocabulary per 02-architecture-decisions.md Decision 1.
     Phase 1 only ever produces DRAFT -- naming a closed set of values
     isn't aggregate behavior, so the other values aren't premature."""
+
+    DRAFT = "draft"
+    SCHEDULED = "scheduled"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+
+
+class VisitStatus(StrEnum):
+    """Full frozen lifecycle vocabulary for a Visit. Only DRAFT is
+    produced today (Phase 2, PR 1): Job.add_visit() always creates a
+    Visit in DRAFT status. The remaining values exist because the API
+    contract and metrics surface (visit_completed_total,
+    visit_cancelled_total{outcome_code}, ...) already name them; later
+    PRs add the transitions that reach them."""
 
     DRAFT = "draft"
     SCHEDULED = "scheduled"
@@ -64,9 +96,35 @@ class SiteAddressSnapshot(BaseModel):
     country: str | None = None
 
 
+class Visit(BaseModel):
+    """A single Visit belonging to a Job. Constructed only through
+    Job.add_visit() -- never directly by application code -- so the
+    terminal-state invariant can't be bypassed."""
+
+    model_config = ConfigDict(validate_assignment=True)
+
+    id: UUID
+    job_id: UUID
+    status: VisitStatus
+
+    scheduled_start: datetime | None = None
+    scheduled_end: datetime | None = None
+
+    actual_start: datetime | None = None
+    actual_end: datetime | None = None
+
+    assigned_member_id: UUID | None = None
+
+    outcome_code: str | None = None
+    completion_notes: str | None = None
+
+    created_at: datetime
+    updated_at: datetime
+
+
 class Job(BaseModel):
-    """job-service's aggregate root. Phase 1 scope only -- see module
-    docstring for what's deliberately absent and why."""
+    """job-service's aggregate root. See module docstring for what's
+    deliberately absent and why."""
 
     model_config = ConfigDict(validate_assignment=True)
 
@@ -90,7 +148,7 @@ class Job(BaseModel):
     contact_email_snapshot: str | None = None
     contact_phone_snapshot: str | None = None
 
-    visits: list[dict[str, object]] = Field(default_factory=list)
+    visits: list[Visit] = Field(default_factory=list)
 
     created_at: datetime
     updated_at: datetime
@@ -100,15 +158,6 @@ class Job(BaseModel):
     def _title_must_not_be_blank(cls, value: str) -> str:
         if not value.strip():
             raise ValueError("title must not be blank")
-        return value
-
-    @field_validator("visits")
-    @classmethod
-    def _visits_must_be_empty(
-        cls, value: list[dict[str, object]]
-    ) -> list[dict[str, object]]:
-        if value:
-            raise ValueError("visits must be empty in Phase 1")
         return value
 
     @classmethod
@@ -128,7 +177,7 @@ class Job(BaseModel):
         contact_email_snapshot: str | None = None,
         contact_phone_snapshot: str | None = None,
     ) -> Job:
-        """The only aggregate command this phase builds. tenant_id is
+        """The only aggregate command Phase 1 builds. tenant_id is
         required and keyword-only, passed explicitly by the
         application service from the verified JWT's claim -- never
         accepted from a request body (Platform Conventions §5).
@@ -156,3 +205,29 @@ class Job(BaseModel):
             created_at=now,
             updated_at=now,
         )
+
+    def add_visit(self) -> Visit:
+        """Create Visit: the sole Phase 2 PR 1 command. Takes no
+        arguments -- the request body is {} per the frozen command
+        contract; scheduling and assignment are separate, later
+        commands, not parameters smuggled in here.
+
+        Raises JobTerminalError if this Job is COMPLETED or CANCELLED.
+        DRAFT, SCHEDULED, and IN_PROGRESS Jobs may all accept a new
+        Visit -- only the two genuinely terminal statuses are
+        rejected, so this is a denylist rather than an allowlist of
+        permitted source statuses."""
+        if self.status in (JobStatus.COMPLETED, JobStatus.CANCELLED):
+            raise JobTerminalError(self.id)
+
+        now = datetime.now(UTC)
+        visit = Visit(
+            id=uuid4(),
+            job_id=self.id,
+            status=VisitStatus.DRAFT,
+            created_at=now,
+            updated_at=now,
+        )
+        self.visits.append(visit)
+        self.updated_at = now
+        return visit

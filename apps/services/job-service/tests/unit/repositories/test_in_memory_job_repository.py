@@ -14,6 +14,15 @@ computed before pagination, offset/limit slicing, and the explicit
 (created_at, id) total ordering -- proven genuine by deliberately creating
 jobs with created_at values OUT of insertion order, so a test passing
 only by accident of dict iteration order would fail.
+
+save() tests (Phase 2, PR 1) cover: persisting an update, deep-copy
+isolation in both directions (matching create()/get()'s established
+guarantee), missing-ID rejection, and the two-part tenant boundary --
+a caller authorized for the wrong tenant, and a Job object that itself
+claims a different tenant than the caller was authorized for. The
+latter is the security-relevant case: it proves save() doesn't trust
+the provenance of the Job it's handed, only the tenant_id the caller
+was actually authorized for.
 """
 
 from datetime import UTC, datetime
@@ -21,6 +30,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from app.exceptions.job import JobNotFoundError
 from app.models.job import Job, JobStatus, SiteAddressSnapshot
 from app.repositories.in_memory.job_repository import InMemoryJobRepository
 
@@ -298,3 +308,102 @@ async def test_list_by_tenant_deep_copies_results(repo: InMemoryJobRepository) -
     second_page = await repo.list_by_tenant(tenant_id=tenant_id)
 
     assert second_page.items[0].title == "Annual boiler service"
+
+
+# ---------------------------------------------------------------------------
+# save() -- Phase 2 Create Visit
+# ---------------------------------------------------------------------------
+
+
+async def test_save_persists_an_added_visit(repo: InMemoryJobRepository) -> None:
+    """The reason save() exists in Phase 2: persisting a Job aggregate
+    that now contains a newly-added Visit, including Pydantic's
+    deep-copying of that nested Visit across the persistence
+    boundary -- not an unrelated scalar field."""
+    job = _make_job()
+    await repo.create(job)
+
+    visit = job.add_visit()
+    saved = await repo.save(tenant_id=job.tenant_id, job=job)
+
+    fetched = await repo.get(tenant_id=job.tenant_id, job_id=job.id)
+
+    assert saved.visits == [visit]
+    assert fetched is not None
+    assert fetched.visits == [visit]
+
+
+async def test_save_deep_copies_input_before_persisting(
+    repo: InMemoryJobRepository,
+) -> None:
+    job = _make_job()
+    await repo.create(job)
+
+    job.title = "Persisted title"
+    await repo.save(tenant_id=job.tenant_id, job=job)
+
+    job.title = "Mutated after save"
+
+    fetched = await repo.get(tenant_id=job.tenant_id, job_id=job.id)
+
+    assert fetched is not None
+    assert fetched.title == "Persisted title"
+
+
+async def test_save_returns_detached_copy(repo: InMemoryJobRepository) -> None:
+    job = _make_job()
+    await repo.create(job)
+
+    saved = await repo.save(tenant_id=job.tenant_id, job=job)
+    saved.title = "Mutated returned copy"
+
+    fetched = await repo.get(tenant_id=job.tenant_id, job_id=job.id)
+
+    assert saved is not job
+    assert fetched is not None
+    assert fetched.title == "Annual boiler service"
+
+
+async def test_save_raises_job_not_found_for_unknown_job(
+    repo: InMemoryJobRepository,
+) -> None:
+    job = _make_job()
+
+    with pytest.raises(JobNotFoundError):
+        await repo.save(tenant_id=job.tenant_id, job=job)
+
+
+async def test_save_does_not_disclose_job_from_another_tenant(
+    repo: InMemoryJobRepository,
+) -> None:
+    job = _make_job()
+    await repo.create(job)
+
+    with pytest.raises(JobNotFoundError):
+        await repo.save(tenant_id=uuid4(), job=job)
+
+
+async def test_save_rejects_job_whose_tenant_id_does_not_match_authorized_tenant(
+    repo: InMemoryJobRepository,
+) -> None:
+    """The security-relevant case, and the reason save() was designed
+    with two tenant checks rather than one: even when the stored row
+    and the caller's authorized tenant_id agree, a Job object that
+    itself claims a different tenant_id must not be allowed to
+    overwrite the record or move it to that other tenant. The final
+    assertion proves the existing stored aggregate survived unchanged,
+    not merely that the tampered write raised."""
+    tenant_id = uuid4()
+    job = _make_job(tenant_id)
+    await repo.create(job)
+
+    original_id = job.id
+    job.tenant_id = uuid4()
+
+    with pytest.raises(JobNotFoundError):
+        await repo.save(tenant_id=tenant_id, job=job)
+
+    fetched = await repo.get(tenant_id=tenant_id, job_id=original_id)
+
+    assert fetched is not None
+    assert fetched.tenant_id == tenant_id

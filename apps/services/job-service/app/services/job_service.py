@@ -52,7 +52,7 @@ from app.exceptions.job import (
     SiteNotFoundError,
     VisitNotFoundError,
 )
-from app.models.job import Job, JobStatus, SiteAddressSnapshot
+from app.models.job import Job, JobStatus, SiteAddressSnapshot, Visit
 from app.repositories.job_repository import JobPage, JobRepository
 from app.services.client_service_client import (
     ClientContactResponse,
@@ -190,21 +190,21 @@ class JobService:
 
     async def get_visit(
         self, *, tenant_id: UUID, job_id: UUID, visit_id: UUID
-    ) -> dict[str, object]:
+    ) -> Visit:
         """Tenant-scoped Job lookup happens first, via get_job() --
         raises JobNotFoundError exactly as that method already does.
         Only once the Job itself resolves does the Visit lookup run.
 
-        Return type is dict[str, object], matching Job.visits' current
-        Phase 1 type -- Visit has no real domain model yet (Phase 2
-        introduces it). Because Job.visits is constrained to always be
-        empty until Phase 2 lifts that constraint, this method
-        currently raises VisitNotFoundError unconditionally for every
-        real Job -- a genuine, correctly-handled 404, not a stand-in
-        for an untested success path. The positive-retrieval case
-        becomes exercisable once Phase 2 exists."""
+        Return type is Visit, now that Phase 2 gives it a real domain
+        model. Because Job.visits is empty until a Visit is actually
+        added via Job.add_visit(), this method still raises
+        VisitNotFoundError unconditionally for every Job created
+        before Phase 2's Create Visit command runs against it -- a
+        genuine, correctly-handled 404, not a stand-in for an untested
+        success path. The positive-retrieval case becomes exercisable
+        once Create Visit (PR 2/3) is wired up."""
         job = await self.get_job(tenant_id=tenant_id, job_id=job_id)
-        visit = next((v for v in job.visits if v.get("id") == visit_id), None)
+        visit = next((v for v in job.visits if v.id == visit_id), None)
         if visit is None:
             raise VisitNotFoundError(visit_id)
         return visit
