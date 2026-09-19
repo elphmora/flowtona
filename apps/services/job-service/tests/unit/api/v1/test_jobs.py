@@ -523,6 +523,7 @@ async def test_get_job_returns_full_job_when_it_exists(
     tenant_id = uuid4()
     app, registry = _build_app(client_service_handler=_unused_client_service_handler)
     job = _make_job(tenant_id)
+    visit = job.add_visit()
     await registry.job_repository.create(job)
     token = _make_token(keypair, tenant_id=tenant_id, permissions=["jobs:read"])
 
@@ -538,7 +539,19 @@ async def test_get_job_returns_full_job_when_it_exists(
     assert body["status"] == "draft"
     assert body["client_name_snapshot"] == "Birmingham Plumbing Co."
     assert body["site_label_snapshot"] == "Main Warehouse"
-    assert body["visits"] == []
+
+    assert len(body["visits"]) == 1
+    returned_visit = body["visits"][0]
+    assert returned_visit["id"] == str(visit.id)
+    assert returned_visit["job_id"] == str(job.id)
+    assert returned_visit["status"] == "draft"
+    assert returned_visit["scheduled_start"] is None
+    assert returned_visit["scheduled_end"] is None
+    assert returned_visit["actual_start"] is None
+    assert returned_visit["actual_end"] is None
+    assert returned_visit["assigned_member_id"] is None
+    assert returned_visit["outcome_code"] is None
+    assert returned_visit["completion_notes"] is None
 
 
 async def test_get_job_returns_404_for_unknown_job_id(
@@ -614,6 +627,7 @@ async def test_list_jobs_returns_the_paginated_envelope(
     tenant_id = uuid4()
     app, registry = _build_app(client_service_handler=_unused_client_service_handler)
     job = _make_job(tenant_id)
+    job.add_visit()
     await registry.job_repository.create(job)
     token = _make_token(keypair, tenant_id=tenant_id, permissions=["jobs:read"])
 
@@ -630,7 +644,7 @@ async def test_list_jobs_returns_the_paginated_envelope(
     assert item["id"] == str(job.id)
     assert item["client_name_snapshot"] == "Birmingham Plumbing Co."
     assert item["site_label_snapshot"] == "Main Warehouse"
-    assert item["visit_count"] == 0
+    assert item["visit_count"] == 1
     assert "visits" not in item  # summary shape, not the nested detail shape
 
 
@@ -806,11 +820,10 @@ async def test_get_visit_returns_job_not_found_for_unknown_job_id(
 async def test_get_visit_returns_visit_not_found_when_job_exists_but_visit_does_not(
     keypair: ec.EllipticCurvePrivateKey,
 ) -> None:
-    """The one reachable outcome today: every real Job's visits list
-    is empty until Phase 2, so this is genuinely correct behavior for
-    any visit_id against an otherwise-valid Job -- not a stand-in for
-    an untested success case. The positive-retrieval test lands in
-    Phase 2 once Visits become constructible."""
+    """Job exists and is otherwise valid, but no Visit has been added
+    to it -- distinct from the positive-retrieval case below, which is
+    only exercisable now that Phase 2 gives Visit a real domain
+    model."""
     tenant_id = uuid4()
     app, registry = _build_app(client_service_handler=_unused_client_service_handler)
     job = _make_job(tenant_id)
@@ -825,6 +838,33 @@ async def test_get_visit_returns_visit_not_found_when_job_exists_but_visit_does_
 
     assert response.status_code == 404
     assert response.json()["code"] == "visit_not_found"
+
+
+async def test_get_visit_returns_the_visit_when_it_exists(
+    keypair: ec.EllipticCurvePrivateKey,
+) -> None:
+    """The positive-retrieval case Query Operations explicitly
+    deferred: every real Job's visits list was empty until Phase 2
+    gave Visit a real domain model. This closes the last gap in the
+    GET-Visit route's test matrix."""
+    tenant_id = uuid4()
+    app, registry = _build_app(client_service_handler=_unused_client_service_handler)
+    job = _make_job(tenant_id)
+    visit = job.add_visit()
+    await registry.job_repository.create(job)
+    token = _make_token(keypair, tenant_id=tenant_id, permissions=["jobs:read"])
+
+    with TestClient(app) as client:
+        response = client.get(
+            f"/v1/jobs/{job.id}/visits/{visit.id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"] == str(visit.id)
+    assert body["job_id"] == str(job.id)
+    assert body["status"] == "draft"
 
 
 async def test_get_visit_returns_job_not_found_for_job_belonging_to_a_different_tenant(
