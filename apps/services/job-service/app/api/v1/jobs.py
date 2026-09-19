@@ -94,6 +94,16 @@ async def create_job(
     return JobResponse.from_domain(job)
 
 
+@router.post("/{job_id}/visits", status_code=201)
+async def add_visit(
+    job_id: UUID,
+    claims: Annotated[AccessTokenClaims, Depends(require_permission(JOBS_WRITE))],
+    job_service: Annotated[JobService, Depends(get_job_service)],
+) -> VisitResponse:
+    visit = await job_service.add_visit(tenant_id=claims.tenant_id, job_id=job_id)
+    return VisitResponse.from_domain(visit)
+
+
 @router.get("")
 async def list_jobs(
     claims: Annotated[AccessTokenClaims, Depends(require_permission(JOBS_READ))],

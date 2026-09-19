@@ -513,7 +513,139 @@ async def test_two_requests_share_the_same_repository(
 
 
 # ---------------------------------------------------------------------------
-# 5. Query Operations -- GET /v1/jobs/{job_id}
+# 5. Create Visit -- POST /v1/jobs/{job_id}/visits
+# ---------------------------------------------------------------------------
+
+
+async def test_add_visit_succeeds_and_returns_the_new_visit(
+    keypair: ec.EllipticCurvePrivateKey,
+) -> None:
+    tenant_id = uuid4()
+    app, registry = _build_app(client_service_handler=_unused_client_service_handler)
+    job = _make_job(tenant_id)
+    await registry.job_repository.create(job)
+    token = _make_token(keypair, tenant_id=tenant_id, permissions=["jobs:write"])
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"/v1/jobs/{job.id}/visits",
+            json={},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["job_id"] == str(job.id)
+    assert body["status"] == "draft"
+    assert body["scheduled_start"] is None
+    assert body["scheduled_end"] is None
+    assert body["actual_start"] is None
+    assert body["actual_end"] is None
+    assert body["assigned_member_id"] is None
+    assert body["outcome_code"] is None
+    assert body["completion_notes"] is None
+    assert body["created_at"] == body["updated_at"]
+
+    persisted = await registry.job_repository.get(tenant_id=tenant_id, job_id=job.id)
+    assert persisted is not None
+    assert len(persisted.visits) == 1
+    assert str(persisted.visits[0].id) == body["id"]
+
+
+async def test_add_visit_returns_404_for_unknown_job_id(
+    keypair: ec.EllipticCurvePrivateKey,
+) -> None:
+    app, _ = _build_app(client_service_handler=_unused_client_service_handler)
+    token = _make_token(keypair, permissions=["jobs:write"])
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"/v1/jobs/{uuid4()}/visits",
+            json={},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "job_not_found"
+
+
+async def test_add_visit_returns_404_for_job_belonging_to_a_different_tenant(
+    keypair: ec.EllipticCurvePrivateKey,
+) -> None:
+    """Tenant non-disclosure at the write boundary too, matching
+    save()'s own tenant-mismatch behavior."""
+    app, registry = _build_app(client_service_handler=_unused_client_service_handler)
+    job = _make_job(uuid4())
+    await registry.job_repository.create(job)
+    token = _make_token(keypair, tenant_id=uuid4(), permissions=["jobs:write"])
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"/v1/jobs/{job.id}/visits",
+            json={},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "job_not_found"
+
+
+@pytest.mark.parametrize("status", [JobStatus.COMPLETED, JobStatus.CANCELLED])
+async def test_add_visit_returns_409_for_terminal_job(
+    keypair: ec.EllipticCurvePrivateKey, status: JobStatus
+) -> None:
+    tenant_id = uuid4()
+    app, registry = _build_app(client_service_handler=_unused_client_service_handler)
+    job = _make_job(tenant_id, status=status)
+    await registry.job_repository.create(job)
+    token = _make_token(keypair, tenant_id=tenant_id, permissions=["jobs:write"])
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"/v1/jobs/{job.id}/visits",
+            json={},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "job_terminal"
+
+    persisted = await registry.job_repository.get(
+        tenant_id=tenant_id,
+        job_id=job.id,
+    )
+    assert persisted is not None
+    assert persisted.visits == []
+
+
+async def test_add_visit_requires_authentication() -> None:
+    app, _ = _build_app(client_service_handler=_unused_client_service_handler)
+
+    with TestClient(app) as client:
+        response = client.post(f"/v1/jobs/{uuid4()}/visits", json={})
+
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == "Bearer"
+
+
+async def test_add_visit_requires_jobs_write_permission(
+    keypair: ec.EllipticCurvePrivateKey,
+) -> None:
+    app, _ = _build_app(client_service_handler=_unused_client_service_handler)
+    token = _make_token(keypair, permissions=["jobs:read"])  # missing jobs:write
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"/v1/jobs/{uuid4()}/visits",
+            json={},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# 6. Query Operations -- GET /v1/jobs/{job_id}
 # ---------------------------------------------------------------------------
 
 
@@ -617,7 +749,7 @@ async def test_get_job_requires_jobs_read_permission(
 
 
 # ---------------------------------------------------------------------------
-# 6. Query Operations -- GET /v1/jobs (list)
+# 7. Query Operations -- GET /v1/jobs (list)
 # ---------------------------------------------------------------------------
 
 
@@ -797,7 +929,7 @@ async def test_list_jobs_requires_jobs_read_permission(
 
 
 # ---------------------------------------------------------------------------
-# 7. Query Operations -- GET /v1/jobs/{job_id}/visits/{visit_id}
+# 8. Query Operations -- GET /v1/jobs/{job_id}/visits/{visit_id}
 # ---------------------------------------------------------------------------
 
 

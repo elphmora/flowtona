@@ -23,11 +23,12 @@ from app.exceptions.job import (
     ClientNotFoundError,
     ContactNotFoundError,
     JobNotFoundError,
+    JobTerminalError,
     ServiceUnavailableError,
     SiteNotFoundError,
     VisitNotFoundError,
 )
-from app.models.job import Job, JobStatus, SiteAddressSnapshot
+from app.models.job import Job, JobStatus, SiteAddressSnapshot, VisitStatus
 from app.repositories.in_memory.job_repository import InMemoryJobRepository
 from app.repositories.job_repository import JobPage
 from app.services.client_service_client import (
@@ -262,6 +263,99 @@ async def test_create_job_rejects_unknown_contact() -> None:
             title="Test job",
             description=None,
         )
+
+
+# ---------------------------------------------------------------------------
+# add_visit() -- Create Visit checkpoint
+# ---------------------------------------------------------------------------
+
+
+async def test_add_visit_raises_not_found_for_unknown_job_id() -> None:
+    service = JobService(_FakeClientServiceClient(), InMemoryJobRepository())
+
+    with pytest.raises(JobNotFoundError):
+        await service.add_visit(tenant_id=uuid4(), job_id=uuid4())
+
+
+async def test_add_visit_raises_not_found_for_wrong_tenant() -> None:
+    """Matches get_job()'s own established isolation guarantee -- a
+    job_id existing under a different tenant is indistinguishable from
+    one that doesn't exist at all."""
+    repository = InMemoryJobRepository()
+    service = JobService(_FakeClientServiceClient(), repository)
+    job = _make_job()
+    await repository.create(job)
+
+    with pytest.raises(JobNotFoundError):
+        await service.add_visit(tenant_id=uuid4(), job_id=job.id)
+
+
+@pytest.mark.parametrize("status", [JobStatus.COMPLETED, JobStatus.CANCELLED])
+async def test_add_visit_raises_terminal_error_for_terminal_job(
+    status: JobStatus,
+) -> None:
+    repository = InMemoryJobRepository()
+    service = JobService(_FakeClientServiceClient(), repository)
+    job = _make_job()
+    job.status = status
+    await repository.create(job)
+
+    with pytest.raises(JobTerminalError):
+        await service.add_visit(tenant_id=job.tenant_id, job_id=job.id)
+
+    persisted = await repository.get(tenant_id=job.tenant_id, job_id=job.id)
+    assert persisted is not None
+    assert persisted.visits == []
+
+
+@pytest.mark.parametrize(
+    "status", [JobStatus.DRAFT, JobStatus.SCHEDULED, JobStatus.IN_PROGRESS]
+)
+async def test_add_visit_succeeds_for_mutable_job_statuses(status: JobStatus) -> None:
+    """Including the deliberate in_progress case -- 02-create-visit.md:
+    adding a Visit never regresses Job state, and real field-service
+    work routinely discovers mid-visit that further attendance is
+    needed."""
+    repository = InMemoryJobRepository()
+    service = JobService(_FakeClientServiceClient(), repository)
+    job = _make_job()
+    job.status = status
+    await repository.create(job)
+
+    visit = await service.add_visit(tenant_id=job.tenant_id, job_id=job.id)
+
+    assert visit.job_id == job.id
+    assert visit.status == VisitStatus.DRAFT
+    assert visit.scheduled_start is None
+    assert visit.assigned_member_id is None
+
+
+async def test_add_visit_persists_the_new_visit() -> None:
+    repository = InMemoryJobRepository()
+    service = JobService(_FakeClientServiceClient(), repository)
+    job = _make_job()
+    await repository.create(job)
+
+    visit = await service.add_visit(tenant_id=job.tenant_id, job_id=job.id)
+
+    persisted = await repository.get(tenant_id=job.tenant_id, job_id=job.id)
+    assert persisted is not None
+    assert persisted.visits == [visit]
+
+
+async def test_add_visit_called_twice_persists_both_visits_with_distinct_ids() -> None:
+    repository = InMemoryJobRepository()
+    service = JobService(_FakeClientServiceClient(), repository)
+    job = _make_job()
+    await repository.create(job)
+
+    first = await service.add_visit(tenant_id=job.tenant_id, job_id=job.id)
+    second = await service.add_visit(tenant_id=job.tenant_id, job_id=job.id)
+
+    assert first.id != second.id
+    persisted = await repository.get(tenant_id=job.tenant_id, job_id=job.id)
+    assert persisted is not None
+    assert persisted.visits == [first, second]
 
 
 # ---------------------------------------------------------------------------

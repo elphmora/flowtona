@@ -188,6 +188,27 @@ class JobService:
             offset=offset,
         )
 
+    async def add_visit(self, *, tenant_id: UUID, job_id: UUID) -> Visit:
+        """Create a draft Visit within an existing Job aggregate.
+
+        The Job is resolved through get_job(), preserving the existing
+        tenant-scoped not-found behavior. Job.add_visit() owns the
+        aggregate's terminal-state invariant and raises JobTerminalError
+        for completed or cancelled Jobs; this service deliberately does
+        not duplicate that domain rule.
+
+        The mutated aggregate is persisted through the repository's
+        tenant-scoped save() operation, then the newly-created Visit is
+        returned to the caller.
+        """
+        job = await self.get_job(tenant_id=tenant_id, job_id=job_id)
+
+        visit = job.add_visit()
+
+        await self._job_repository.save(tenant_id=tenant_id, job=job)
+
+        return visit
+
     async def get_visit(
         self, *, tenant_id: UUID, job_id: UUID, visit_id: UUID
     ) -> Visit:
@@ -198,13 +219,13 @@ class JobService:
         Return type is Visit, now that Phase 2 gives it a real domain
         model. Because Job.visits is empty until a Visit is actually
         added via Job.add_visit(), this method still raises
-        VisitNotFoundError unconditionally for every Job created
-        before Phase 2's Create Visit command runs against it -- a
-        genuine, correctly-handled 404, not a stand-in for an untested
-        success path. The positive-retrieval case becomes exercisable
-        once Create Visit (PR 2/3) is wired up."""
+        VisitNotFoundError for a visit_id that does not match a Visit
+        belonging to the resolved Job.
+        """
         job = await self.get_job(tenant_id=tenant_id, job_id=job_id)
         visit = next((v for v in job.visits if v.id == visit_id), None)
+
         if visit is None:
             raise VisitNotFoundError(visit_id)
+
         return visit
